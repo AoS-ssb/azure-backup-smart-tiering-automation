@@ -1,0 +1,20 @@
+{
+  "Name": "Azure Backup Smart Tiering Policy Remediator",
+  "IsCustom": true,
+  "Description": "Can read Recovery Services vaults and read/update backup policies for enable-only Smart Tiering automation. Cannot delete vaults, policies, recovery points, or backup data.",
+  "Actions": [
+    "Microsoft.RecoveryServices/Vaults/read",
+    "Microsoft.RecoveryServices/Vaults/backupPolicies/read",
+    "Microsoft.RecoveryServices/Vaults/backupPolicies/write",
+    "Microsoft.RecoveryServices/Vaults/backupPolicies/operationResults/read",
+    "Microsoft.RecoveryServices/Vaults/backupPolicies/operations/read"
+  ],
+  "NotActions": [
+    "Microsoft.RecoveryServices/Vaults/backupPolicies/delete"
+  ],
+  "DataActions": [],
+  "NotDataActions": [],
+  "AssignableScopes": [
+    "/subscriptions/REPLACE_WITH_SUBSCRIPTION_ID"
+  ]
+}
