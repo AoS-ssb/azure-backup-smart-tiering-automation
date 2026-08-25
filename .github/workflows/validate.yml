@@ -1,0 +1,29 @@
+name: validate
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Parse PowerShell and check safety markers
+        shell: pwsh
+        run: ./tests/StaticValidation.ps1
+
+      - name: Validate RBAC JSON templates
+        shell: bash
+        run: jq empty infra/rbac/*.json
+
+      - name: Compile Bicep fixture
+        shell: bash
+        run: az bicep build --file infra/test-environment.bicep --stdout > /dev/null
