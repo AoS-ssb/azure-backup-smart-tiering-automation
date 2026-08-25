@@ -13,3 +13,5 @@ This repository does not contain tenant-specific Azure Portal links or resource 
 9. Open each Recovery Services vault → **Backup policies** → the canary policy to inspect `TierRecommended`.
 
 The reference validation leaves policies with zero protected items. It proves the control-plane path, not actual recovery-point movement into archive storage.
+
+Version 1.1 additions: compare the SHA-256 of the published runbook content (Runbooks → **Enable-SmartTiering** → **Edit** → copy) with `sha256sum src/Enable-SmartTiering.ps1` for the commit you deployed, and read the `SUMMARY` line of each job for `runbookVersion`, `candidates`, `policiesWritten`, `writesSubmitted`, `writesUnknown` and `abortReason`.

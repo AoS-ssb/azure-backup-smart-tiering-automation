@@ -28,7 +28,13 @@ $requiredSafetyMarkers = @(
     "AlreadyEnabledAlternateMode",
     "WouldEnableTierRecommended",
     "EnabledAndVerified",
-    "Post-write verification detected a schedule or retention change"
+    "Post-write verification detected a schedule or retention change",
+    "SkippedNoArchiveEligibility",
+    "SkippedProtectedItemsExceedLimit",
+    "WriteOutcomeUnknown",
+    "AllowUnfilteredApply",
+    "MaxChanges",
+    "Azure-AsyncOperation"
 )
 
 foreach ($marker in $requiredSafetyMarkers) {

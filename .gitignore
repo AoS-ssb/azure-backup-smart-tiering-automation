@@ -12,3 +12,6 @@ validation-results.json
 .DS_Store
 .vscode/
 *.log
+
+# Harness output
+tests/results*.md

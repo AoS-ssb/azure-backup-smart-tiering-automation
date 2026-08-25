@@ -1,5 +1,9 @@
 # Sanitized validation summary
 
+This file records what has been proven live and offline, by version. Identifiers are omitted.
+
+## 1.0 — live validation (2026-08-24)
+
 Validated against isolated live Azure resources on 2026-08-24. Environment identifiers and job IDs are intentionally omitted.
 
 ## Control-plane result
@@ -48,3 +52,66 @@ The validation jobs used an exact custom policy-name filter, so none of the serv
 - Cross-tenant execution.
 
 This evidence supports controlled canary use; it is not blanket certification for every Recovery Services backup-policy shape.
+
+
+## 1.0 — live audit against the same fixture (2026-08-25)
+
+An unfiltered resource-group audit (`Apply=false`, vault filter only) of the 1.0 runbook classified
+the vault's four policies as follows:
+
+| Policy | Shape | 1.0 result |
+|---|---|---|
+| Service-created default VM policy | V1, daily, 30-day retention, no monthly/yearly | `WouldEnableTierRecommended` (a write candidate) |
+| Service-created enhanced VM policy | V2, hourly, no monthly/yearly | `WouldEnableTierRecommended` (a write candidate) |
+| Service-created SQL log policy | AzureWorkload | `SkippedUnsupportedWorkload` |
+| Canary policy | V1 daily with monthly + yearly | `AlreadyCompliant` |
+
+The default policy was listed **before** the canary policy, so an unfiltered apply would have
+attempted it first and — because 1.0 isolates errors per vault — a rejection would have skipped the
+canary. This is the live counterpart of harness scenario S21 and the reason 1.1 adds
+`SkippedNoArchiveEligibility` and per-policy isolation.
+
+**Apply against the daily-only default policy (1.0, exact filter, 2026-08-25):** ARM rejected the
+full-policy PUT with HTTP 400 `BMSUserErrorInvalidPolicyInput` ("Input for create or update policy
+is not in proper format. Please check format of parameters like schedule time, schedule days,
+retention time and retention days"). The 1.0 runbook recorded an `Error` row with `policy: null`
+and the job failed; the policy was unchanged. Unfiltered, that failure would have abandoned the
+eligible canary policy listed after it in the same vault. 1.1 never submits that PUT.
+
+## 1.1 — offline verification (2026-08-25)
+
+`tests/BehaviorHarness.ps1` (45 scenarios) executes the unmodified runbook under PowerShell 7.4 with a mocked
+ARM transport and asserts per-policy actions, write counters, PUT bodies, abort reasons and the
+absence of ARM calls for parameter-validation failures. Scenarios cover: classification of every
+mode, ZRS and workload skips, pagination, `429` and `Retry-After`, `401` token refresh, `202` with
+`Azure-AsyncOperation` followed to `Succeeded`/`Failed`, verification that never converges
+(`WriteOutcomeUnknown`), a lost PUT response reconciled by re-read, tag preservation, member-order
+changes, daily-only and 8-vs-9-month eligibility, protected-item limits, `MaxChanges`,
+`ExpectedMatches`, whitespace filters, subscription-scope resource-group rejection and per-policy
+error isolation. The harness runs in CI on every push and pull request.
+
+## 1.1 — live qualification (2026-08-25)
+
+Run against the retained 2026-08-24 fixture as an **additional** runbook (`Enable-SmartTiering-v11`,
+linked to the `PowerShell74` runtime environment; the 1.0 runbook was left untouched). The published
+content hash equalled the repository file's SHA-256 (`2cef45ac…`). Eight jobs, 3–5 seconds each.
+
+| Step | Job parameters | Result |
+|---|---|---|
+| Unfiltered audit | RG scope, vault filter only, `Apply=false` | `DefaultPolicy` and `EnhancedPolicy` → `SkippedNoArchiveEligibility` (horizon 0); SQL log policy → `SkippedUnsupportedWorkload`; canary → `AlreadyCompliant` (horizon 24); `errors=0` |
+| Seed | `az rest` PUT of the canary policy with `DoNotTier` | mode read back as `DoNotTier` |
+| Exact audit | `VaultName`+`PolicyName`, `Apply=false` | `WouldEnableTierRecommended`, `candidates=1`, writes `0` |
+| Exact apply | same, `Apply=true` (defaults: `MaxChanges=1`, `MaxProtectedItemsPerPolicy=0`) | `EnabledAndVerified`, `operationStatus=HTTP 200` (synchronous), `writesSubmitted=1`, `policiesWritten=1`, `errors=0` |
+| Idempotent apply | same again | `AlreadyCompliant`, `candidates=0`, `policiesWritten=0`, job Completed |
+| Post-state diff | canary policy before seed vs after apply, excluding `tieringPolicy` | identical (schedule, retention, `instantRpRetentionRangeInDays`, `timeZone`, `location`) |
+| Guard: whitespace `VaultName` | `VaultName="   "`, `Apply=true` | job **Failed** at parameter validation before any ARM call |
+| Guard: unfiltered apply | no filters, `Apply=true`, no opt-in | job **Failed** at parameter validation before any ARM call |
+| Guard: misspelled `PolicyName` | exact vault, wrong policy, `Apply=true` | job **Failed** with `abortReason=NoPolicyMatched`, `writesSubmitted=0` |
+| Opt-in unfiltered apply | `AllowUnfilteredApply=true`, `Apply=true`, `MaxChanges=1` | six Azure VM policies across both vaults classified, `candidates=0`, zero writes, job Completed |
+
+What this proves: the text-preserving JSON layer, `Invoke-WebRequest` transport, eligibility gate,
+two-phase apply, fail-closed guards and verification all work in the real Automation PowerShell 7.4
+sandbox against real ARM responses. What it still does not prove: the `202` asynchronous path (every
+live write completed synchronously with HTTP 200), tagged policies, V2/hourly writes, protected
+items, Resource Guard/MUA, throttling, or archive movement — those remain harness-only and are listed
+as required canaries in `docs/design-and-limitations.md`.

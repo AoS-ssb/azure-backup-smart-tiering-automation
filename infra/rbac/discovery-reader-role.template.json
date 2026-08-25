@@ -1,7 +1,7 @@
 {
   "Name": "Azure Backup Smart Tiering Discovery Reader",
   "IsCustom": true,
-  "Description": "Can enumerate Recovery Services vaults and read backup policies for Smart Tiering discovery. Has no write or delete actions.",
+  "Description": "Can enumerate Recovery Services vaults and read backup policies for Smart Tiering discovery. Has no write or delete actions. Assign at resource-group scope for ResourceGroup-scoped runs; subscription scope is only needed for ScopeType=Subscription discovery.",
   "Actions": [
     "Microsoft.RecoveryServices/Vaults/read",
     "Microsoft.RecoveryServices/Vaults/backupPolicies/read"
