@@ -76,3 +76,9 @@ Initial publication: live-validated REST runbook, Bicep test fixture, custom RBA
 marker-based static validation. Superseded the July 2026 `Enable-RsvSmartTiering` prototype
 (which had a `TierAfter` mode, an LTR eligibility check, a weekly schedule and deploy/teardown
 scripts — all intentionally dropped; the eligibility check returns in 1.1.0).
+
+### Release provenance
+- Tag `v1.1.0` = commit `6c5937d` (squash of the reviewed branch). Published to the demo Automation Account on
+  2026-08-25 as runbook `Enable-SmartTiering` (PowerShell 7.4 runtime); fetch-back content SHA-256
+  `2cef45acc81b04a6…` equals `src/Enable-SmartTiering.ps1` at this tag. The qualification copy
+  `Enable-SmartTiering-v11` was retained.
