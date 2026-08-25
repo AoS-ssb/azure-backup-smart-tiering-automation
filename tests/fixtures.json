@@ -1,0 +1,112 @@
+{
+  "_source": "evidence/live-azure-evidence.md, policies at lines 240-450 and vault redundancy at lines 219-235",
+  "canaryPolicy": {
+    "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-fixture/providers/Microsoft.RecoveryServices/vaults/rsv-fixture-sub/backupPolicies/smart-tiering-canary",
+    "name": "smart-tiering-canary",
+    "properties": {
+      "backupManagementType": "AzureIaasVM",
+      "instantRPDetails": {},
+      "instantRpRetentionRangeInDays": 2,
+      "protectedItemsCount": 0,
+      "retentionPolicy": {
+        "dailySchedule": {
+          "retentionDuration": { "count": 30, "durationType": "Days" },
+          "retentionTimes": [ "2026-08-25T02:00:00Z" ]
+        },
+        "monthlySchedule": {
+          "retentionDuration": { "count": 12, "durationType": "Months" },
+          "retentionScheduleDaily": { "daysOfTheMonth": [ { "date": 1, "isLast": false } ] },
+          "retentionScheduleFormatType": "Daily",
+          "retentionTimes": [ "2026-08-25T02:00:00Z" ]
+        },
+        "retentionPolicyType": "LongTermRetentionPolicy",
+        "weeklySchedule": {
+          "daysOfTheWeek": [ "Sunday" ],
+          "retentionDuration": { "count": 12, "durationType": "Weeks" },
+          "retentionTimes": [ "2026-08-25T02:00:00Z" ]
+        },
+        "yearlySchedule": {
+          "monthsOfYear": [ "January" ],
+          "retentionDuration": { "count": 2, "durationType": "Years" },
+          "retentionScheduleDaily": { "daysOfTheMonth": [ { "date": 1, "isLast": false } ] },
+          "retentionScheduleFormatType": "Daily",
+          "retentionTimes": [ "2026-08-25T02:00:00Z" ]
+        }
+      },
+      "schedulePolicy": {
+        "schedulePolicyType": "SimpleSchedulePolicy",
+        "scheduleRunFrequency": "Daily",
+        "scheduleRunTimes": [ "2026-08-25T02:00:00Z" ],
+        "scheduleWeeklyFrequency": 0
+      },
+      "tieringPolicy": {
+        "ArchivedRP": { "duration": 0, "durationType": "Invalid", "tieringMode": "TierRecommended" }
+      },
+      "timeZone": "UTC"
+    },
+    "type": "Microsoft.RecoveryServices/vaults/backupPolicies"
+  },
+  "defaultPolicy": {
+    "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-fixture/providers/Microsoft.RecoveryServices/vaults/rsv-fixture-sub/backupPolicies/DefaultPolicy",
+    "name": "DefaultPolicy",
+    "properties": {
+      "backupManagementType": "AzureIaasVM",
+      "instantRPDetails": {},
+      "instantRpRetentionRangeInDays": 2,
+      "policyType": "V1",
+      "protectedItemsCount": 0,
+      "retentionPolicy": {
+        "dailySchedule": {
+          "retentionDuration": { "count": 30, "durationType": "Days" },
+          "retentionTimes": [ "2026-08-25T05:00:00Z" ]
+        },
+        "retentionPolicyType": "LongTermRetentionPolicy"
+      },
+      "schedulePolicy": {
+        "schedulePolicyType": "SimpleSchedulePolicy",
+        "scheduleRunFrequency": "Daily",
+        "scheduleRunTimes": [ "2026-08-25T05:00:00Z" ],
+        "scheduleWeeklyFrequency": 0
+      },
+      "timeZone": "UTC"
+    },
+    "type": "Microsoft.RecoveryServices/vaults/backupPolicies"
+  },
+  "workloadPolicy": {
+    "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-fixture/providers/Microsoft.RecoveryServices/vaults/rsv-fixture-sub/backupPolicies/HourlyLogBackup",
+    "name": "HourlyLogBackup",
+    "properties": {
+      "backupManagementType": "AzureWorkload",
+      "protectedItemsCount": 0,
+      "settings": { "isCompression": false, "issqlcompression": false, "timeZone": "UTC" },
+      "subProtectionPolicy": [
+        {
+          "policyType": "Full",
+          "retentionPolicy": {
+            "dailySchedule": {
+              "retentionDuration": { "count": 30, "durationType": "Days" },
+              "retentionTimes": [ "2026-08-25T05:00:00Z" ]
+            },
+            "retentionPolicyType": "LongTermRetentionPolicy"
+          },
+          "schedulePolicy": {
+            "schedulePolicyType": "SimpleSchedulePolicy",
+            "scheduleRunFrequency": "Daily",
+            "scheduleRunTimes": [ "2026-08-25T05:00:00Z" ],
+            "scheduleWeeklyFrequency": 0
+          }
+        },
+        {
+          "policyType": "Log",
+          "retentionPolicy": {
+            "retentionDuration": { "count": 30, "durationType": "Days" },
+            "retentionPolicyType": "SimpleRetentionPolicy"
+          },
+          "schedulePolicy": { "scheduleFrequencyInMins": 60, "schedulePolicyType": "LogSchedulePolicy" }
+        }
+      ],
+      "workLoadType": "SQLDataBase"
+    },
+    "type": "Microsoft.RecoveryServices/vaults/backupPolicies"
+  }
+}

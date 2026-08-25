@@ -2,7 +2,7 @@
 
 ## Decision summary
 
-This repository contains a live-validated, audit-first Azure VM backup-policy remediator. Its current REST implementation is suitable for controlled canaries. Before production fleet use, implement the hardening items below or migrate the setter to Microsoft's supported Azure PowerShell cmdlet.
+This repository contains an audit-first Azure VM backup-policy remediator. Version 1.0 was live-validated on empty canary policies; version 1.1 adds the orchestration guards that an adversarial review found missing. Orchestration hardening (targeting, eligibility, isolation, operation tracking, verification) is required **regardless of which setter is used** — switching to the supported Azure PowerShell cmdlet would not replace any of it. The REST setter remains because it is the implementation that was validated live and needs no Az modules.
 
 Smart Tiering is configured on each child backup policy:
 
@@ -52,37 +52,43 @@ Pin compatible `Az.Accounts` and `Az.RecoveryServices` versions in the PowerShel
 | Azure Policy | Governance if a modifiable leaf alias exists | No current Smart Tiering built-in or modifiable `ArchivedRP.tieringMode` alias |
 | Azure Automation + REST | Controlled fleet discovery and remediation | Custom serialization, long-running-operation, and API-version logic must be maintained |
 
-## Current implementation limitations
+## Current implementation limitations (1.1)
+
+Closed in 1.1 (see CHANGELOG.md): eligibility gate, per-policy isolation, fail-closed targeting,
+`MaxChanges`/`ExpectedMatches`/protected-item guards, asynchronous-operation tracking with
+separate submitted/verified/unknown counters, tag preservation, structural full-property
+verification, request timeouts, null-safe diagnostics, token refresh on `401`, `Retry-After`.
+
+Still open:
 
 - Only `AzureIaasVM` policies are handled. SQL Server and SAP HANA use a different policy shape and `TierAfter`/`TierAllEligible` duration semantics.
 - ZRS vaults are skipped because Vault Archive is unsupported.
-- Only an empty V1 daily Azure VM policy was write-tested. V2/hourly policies and policies protecting real workloads were not modified during validation.
-- The script verifies schedule and retention, not every non-tiering property. Tiering is the only intended mutation, but complete equivalence is not currently proven.
-- Root policy tags are not copied into the REST payload or verified. A tagged policy requires additional testing and preservation logic.
-- The update API can return `202 Accepted`. The script polls the policy for up to about 60 seconds instead of explicitly following the `Azure-AsyncOperation` or `Location` header.
-- The tested API did not return an ETag. The second point-read narrows the concurrency window but does not provide atomic optimistic concurrency.
-- One policy error stops the remaining policies in that vault; error isolation is currently at vault level.
-- The managed-identity token is acquired once. Very long jobs should refresh before expiry or after `401`.
-- Retry logic does not honor `Retry-After` and has no jitter.
-- A subscription-scope `PolicyName` filter matches that name in every discovered vault; it is not a vault/policy-pair allowlist.
-- A misspelled vault or policy filter results in a successful zero-match summary.
-- There is no `MaxChanges`, mandatory allowlist, exclusion set, or change-ticket guard.
-- The script does not validate whether a policy has monthly/yearly recovery points that can become archive-eligible.
-- Resource Guard/MUA may block unattended updates. The script does not bypass it.
-- There is no automatic rollback after a successful policy write.
+- Only empty V1 daily Azure VM policies have been write-tested live. V2/hourly policies, tagged policies and policies protecting real workloads were not modified during validation; the defaults (`MaxProtectedItemsPerPolicy=0`) refuse protected policies until raised deliberately.
+- The tested API did not return an ETag. The pre-write structural comparison narrows the concurrency window but is not atomic; run apply jobs for a vault one at a time. Fail closed for protected policies until an ETag-bearing API version is confirmed.
+- Eligibility is computed from the policy's monthly/yearly retention horizon (≥ `MinimumRetentionMonths`, minimum 9; only `Months`/`Years` units count). It rules out policies that can never qualify; it does not inspect whether mature recovery points exist, whether the region supports the archive tier, or what Azure will recommend for a given VM.
+- The API returned no ETag during validation, and Microsoft documents `eTag` on the policy resource but no `If-Match` compare-and-swap contract; `If-Match` is sent when available as best effort only.
+- Recovery points moved to the archive tier carry a 180-day early-deletion charge; enabling `TierRecommended` does not guarantee immediate movement.
+- Resource Guard/MUA may block unattended updates. The runbook reports the denial for that policy and continues; it does not bypass MUA.
+- There is no automatic rollback after a successful write (deliberately: another full PUT could overwrite newer state and cannot reverse an archive move). Recovery is operator-controlled: set `DoNotTier` on the policy through the Portal or the cmdlet.
+- Commercial Azure endpoints only (`management.azure.com`, public identity audience).
+- Discovery is a serial ARM enumeration. No estate-scale run has been measured; sharding, checkpoints or Azure Resource Graph are not implemented and should only be considered after a measured audit of a real estate.
 
-## Production hardening order
+## Production hardening status
 
-1. Require explicit policy resource-ID allowlists for apply mode.
-2. Add exclusions, `MaxChanges`, and fail-closed zero-match behavior for canaries.
-3. Isolate errors per policy.
-4. Compare the complete policy before/after, excluding only documented read-only fields and the intended tiering change.
-5. Preserve and verify resource tags.
-6. Track the asynchronous update operation to its terminal state.
-7. Refresh tokens and honor `Retry-After` with jitter.
-8. Add V1, V2/hourly, tagged, protected-item, and Resource Guard test cases.
-9. Canary-test a cmdlet-based setter using pinned Az modules.
-10. Use Azure Resource Graph only for large-scale discovery, followed by authoritative point reads before any write.
+| # | Item (1.0 plan) | 1.1 status |
+|---|---|---|
+| 1 | Explicit policy allowlists for apply mode | Partial: exact-name fence, `ExpectedMatches`, `MaxChanges=1`, `AllowUnfilteredApply` opt-in. Resource-ID manifests deliberately deferred until a real fleet exists |
+| 2 | Exclusions, `MaxChanges`, fail-closed zero-match | Done (`MaxChanges`, `NoPolicyMatched` abort); exclusions deferred |
+| 3 | Isolate errors per policy | Done |
+| 4 | Compare the complete policy before/after | Done (structural, member-order-insensitive, case-sensitive; excludes only `tieringPolicy`, `protectedItemsCount`, `resourceGuardOperationRequests`) |
+| 5 | Preserve and verify resource tags | Done |
+| 6 | Track the asynchronous operation to terminal state | Done (`Azure-AsyncOperation`, then `Location`, then resource polling; unknown outcomes reported, never retried) |
+| 7 | Refresh tokens, honour `Retry-After`, jitter, timeouts | Done |
+| 8 | V1, V2/hourly, tagged, protected-item, Resource Guard test cases | Offline: covered by the harness. Live: still required before those shapes are used |
+| 9 | Canary-test a cmdlet-based setter | Deferred; not a substitute for items 1–7 |
+| 10 | Azure Resource Graph for large-scale discovery | Deferred pending a measured need |
+| new | Eligibility gate (monthly/yearly retention horizon) | Done — the 1.0 runbook selected the service-created daily-only default policies (confirmed live 2026-08-25) |
+| new | Behavioural CI on PowerShell 7.4, pinned actions, PSScriptAnalyzer, exact RBAC assertions | Done |
 
 ## Official references
 
