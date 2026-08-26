@@ -13,6 +13,6 @@
   "DataActions": [],
   "NotDataActions": [],
   "AssignableScopes": [
-    "/subscriptions/REPLACE_WITH_SUBSCRIPTION_ID"
+    "/subscriptions/<subscription-id>/resourceGroups/<ring-resource-group>"
   ]
 }

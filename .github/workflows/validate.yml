@@ -47,3 +47,7 @@ jobs:
       - name: Compile Bicep fixture
         shell: bash
         run: az bicep build --file infra/test-environment.bicep --stdout > /dev/null
+
+      - name: Shell scripts parse
+        shell: bash
+        run: for f in scripts/*.sh; do bash -n "$f"; done

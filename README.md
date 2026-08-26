@@ -78,6 +78,10 @@ infra/test-environment.bicep              Empty two-vault canary fixture
 infra/rbac/*.template.json                Portable custom-role definitions
 tests/StaticValidation.ps1                Parser and safety-marker checks
 tests/BehaviorHarness.ps1                 Behavioural harness: real runbook + mocked ARM (45 scenarios)
+scripts/publish-runbook.sh                Publish + link runtime + fetch-back hash check (release pipeline safe)
+scripts/ring-role.sh                      Grant / revoke the ring-scoped policy remediator role
+docs/replicate-in-azure.md                Step-by-step replication with the checkpoint expected at each step
+docs/gotchas.md                           Everything that bit us — read before the first Apply=true
 docs/design-and-limitations.md            Method comparison, limitations, hardening status
 docs/validation.md                        Sanitised live-test evidence (1.0) and 1.1 verification
 docs/inspection-guide.md                  Azure Portal inspection path
@@ -87,6 +91,9 @@ CHANGELOG.md                              What changed in 1.1 and why
 
 Raw subscription IDs, principal IDs, role-assignment IDs, job IDs and live Portal links are
 intentionally excluded.
+
+> **Replicating this?** Follow [docs/replicate-in-azure.md](docs/replicate-in-azure.md) end to end and read
+> [docs/gotchas.md](docs/gotchas.md) first. The sections below are the reference behind those two pages.
 
 ## Prerequisites
 
@@ -169,16 +176,19 @@ az automation runbook publish \
 Link the runbook to the `PowerShell74` runtime environment (the Portal, or the Automation ARM API
 `PATCH .../runbooks/Enable-SmartTiering?api-version=2024-10-23` with
 `{"properties":{"runtimeEnvironment":"PowerShell74"}}`), and record the SHA-256 of the file you
-published so the job evidence can be tied to a commit:
+published so the job evidence can be tied to a commit. `scripts/publish-runbook.sh` does all of this in one
+go and exits non-zero unless the fetch-back SHA-256 equals your local file:
 
 ```bash
-sha256sum src/Enable-SmartTiering.ps1
+SUBSCRIPTION_ID=<sub> RESOURCE_GROUP=<rg> AUTOMATION_ACCOUNT=<account> scripts/publish-runbook.sh
 ```
 
 ## RBAC model
 
-Render the two role templates by replacing `REPLACE_WITH_SUBSCRIPTION_ID`, then create them with
-`az role definition create --role-definition @<file>`.
+Render the reader template by replacing `REPLACE_WITH_SUBSCRIPTION_ID`, and the remediator template by
+replacing `<subscription-id>` and `<ring-resource-group>` (its only assignable scope is that resource
+group), then create them with `az role definition create --role-definition @<file>` —
+`scripts/ring-role.sh grant|revoke` does the remediator half.
 
 Assign:
 
