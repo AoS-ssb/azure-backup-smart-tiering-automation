@@ -60,5 +60,7 @@ jobs:
       - name: Documented Bash blocks parse
         shell: bash
         run: |
+          grep -Eq '^AUTOMATION_COMMIT="[0-9a-f]{40}"$' docs/replicate-in-azure.md
+          ! grep -q '<reviewed-commit-sha>' docs/replicate-in-azure.md
           awk '/^```bash$/{on=1;next} /^```$/{on=0} on' README.md | bash -n
           awk '/^```bash$/{on=1;next} /^```$/{on=0} on' docs/replicate-in-azure.md | bash -n
