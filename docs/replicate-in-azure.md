@@ -10,8 +10,9 @@ recovery point into archive storage. Read [gotchas.md](gotchas.md) before the fi
 
 ## 0. Prerequisites and source pin
 
-- Bash, `curl`, `jq`, Azure CLI 2.75.0 or newer with Bicep and the experimental `automation`
-  extension version `1.0.0b2`, and PowerShell 7.4 for the offline harness.
+- Bash 4 or newer, `curl`, `jq`, GNU coreutils (`sha256sum` and `sort -V`), Azure CLI 2.75.0 or
+  newer with Bicep and the experimental `automation` extension version `1.0.0b2`, and PowerShell
+  7.4 for the offline harness.
 - A commercial Azure subscription where you can create a new isolated resource group.
 - Contributor for the fixture and runbook. Owner or User Access Administrator is needed only at
   the canary resource group while creating the two custom roles and their assignments.
@@ -59,6 +60,7 @@ AA="aa-smart-tiering-$SUFFIX"
 RG_VAULT="rsv-smarttier-rg-$SUFFIX"
 SUB_VAULT="rsv-smarttier-sub-$SUFFIX"
 POLICY="smart-tiering-remediation-canary"
+ARM="https://management.azure.com"
 RG_SCOPE="/subscriptions/$SUB/resourceGroups/$RG"
 EVIDENCE_DIR="$(mktemp -d)"
 ```
@@ -174,9 +176,14 @@ wait_job() {
 
 WRITER_GRANTED=false
 revoke_writer_on_exit() {
+  local original_status=$?
   if [ "$WRITER_GRANTED" = true ]; then
-    "$AUTOMATION_DIR/scripts/ring-role.sh" revoke "$SUB" "$RG" "$PRINCIPAL" || true
+    if ! "$AUTOMATION_DIR/scripts/ring-role.sh" revoke "$SUB" "$RG" "$PRINCIPAL"; then
+      printf 'Automatic writer-role revocation failed; revoke it manually now\n' >&2
+      return 1
+    fi
   fi
+  return "$original_status"
 }
 trap revoke_writer_on_exit EXIT
 
@@ -224,7 +231,7 @@ This direct seed is an operator action on the empty canary; it does not use the 
 
 ```bash
 POLICY_ID="$RG_SCOPE/providers/Microsoft.RecoveryServices/vaults/$RG_VAULT/backupPolicies/$POLICY"
-POLICY_URL="https://management.azure.com$POLICY_ID?api-version=2025-08-01"
+POLICY_URL="$ARM$POLICY_ID?api-version=2025-08-01"
 
 az rest --method get --url "$POLICY_URL" > "$EVIDENCE_DIR/pre.json"
 jq -e '
@@ -242,10 +249,11 @@ jq '
 ' "$EVIDENCE_DIR/pre.json" > "$EVIDENCE_DIR/seed.json"
 
 ETAG="$(jq -r '.eTag // empty' "$EVIDENCE_DIR/pre.json")"
-SEED_TOKEN="$(az account get-access-token --resource "https://management.azure.com/" \
+SEED_TOKEN="$(az account get-access-token --resource "$ARM/" \
   --query accessToken -o tsv)"
 SEED_CURL=(
   --silent --show-error
+  --proto '=https'
   --request PUT
   --url "$POLICY_URL"
   --header "Authorization: Bearer $SEED_TOKEN"
@@ -259,7 +267,6 @@ if [ -n "$ETAG" ]; then
   SEED_CURL+=(--header "If-Match: $ETAG")
 fi
 SEED_HTTP_STATUS="$(curl "${SEED_CURL[@]}")"
-unset SEED_TOKEN SEED_CURL
 
 case "$SEED_HTTP_STATUS" in
   200)
@@ -270,7 +277,24 @@ case "$SEED_HTTP_STATUS" in
         sub(/^[^:]+:[[:space:]]*/, ""); sub(/\r$/, ""); print; exit
       }
     ' "$EVIDENCE_DIR/seed-headers.txt")"
-    test -n "$SEED_OPERATION_URL"
+    SEED_LOCATION_URL="$(awk '
+      tolower($1) == "location:" {
+        sub(/^[^:]+:[[:space:]]*/, ""); sub(/\r$/, ""); print; exit
+      }
+    ' "$EVIDENCE_DIR/seed-headers.txt")"
+    test -n "$SEED_OPERATION_URL" || test -n "$SEED_LOCATION_URL"
+    if [ -n "$SEED_OPERATION_URL" ]; then
+      case "$SEED_OPERATION_URL" in
+        "$ARM"/*) ;;
+        *) printf 'Untrusted policy-operation URL\n' >&2; exit 1 ;;
+      esac
+    fi
+    if [ -n "$SEED_LOCATION_URL" ]; then
+      case "$SEED_LOCATION_URL" in
+        "$ARM"/*) ;;
+        *) printf 'Untrusted policy-result URL\n' >&2; exit 1 ;;
+      esac
+    fi
     SEED_RETRY_AFTER="$(awk '
       tolower($1) == "retry-after:" {gsub(/\r/, "", $2); print $2; exit}
     ' "$EVIDENCE_DIR/seed-headers.txt")"
@@ -281,28 +305,60 @@ case "$SEED_HTTP_STATUS" in
       SEED_RETRY_AFTER=60
     fi
     SEED_DEADLINE="$(( $(date +%s) + 900 ))"
-    SEED_OPERATION_STATUS=""
-    while [ "$(date +%s)" -lt "$SEED_DEADLINE" ]; do
-      sleep "$SEED_RETRY_AFTER"
-      az rest --method get --url "$SEED_OPERATION_URL" \
-        > "$EVIDENCE_DIR/seed-operation.json"
-      SEED_OPERATION_STATUS="$(jq -r '.status // .properties.status // empty' \
-        "$EVIDENCE_DIR/seed-operation.json")"
-      case "${SEED_OPERATION_STATUS,,}" in
-        succeeded) break ;;
-        failed|canceled|cancelled)
-          printf 'Exact policy seed operation failed\n' >&2
-          exit 1
-          ;;
+    if [ -n "$SEED_OPERATION_URL" ]; then
+      SEED_OPERATION_STATUS=""
+      while [ "$(date +%s)" -lt "$SEED_DEADLINE" ]; do
+        sleep "$SEED_RETRY_AFTER"
+        az rest --method get --url "$SEED_OPERATION_URL" \
+          > "$EVIDENCE_DIR/seed-operation.json"
+        SEED_OPERATION_STATUS="$(jq -r '.status // .properties.status // empty' \
+          "$EVIDENCE_DIR/seed-operation.json")"
+        case "${SEED_OPERATION_STATUS,,}" in
+          succeeded) break ;;
+          failed|canceled|cancelled)
+            printf 'Exact policy seed operation failed\n' >&2
+            exit 1
+            ;;
+        esac
+      done
+      test "${SEED_OPERATION_STATUS,,}" = "succeeded"
+    else
+      SEED_LOCATION_STATUS=""
+      SEED_LOCATION_CURL=(
+        --silent --show-error
+        --proto '=https'
+        --request GET
+        --url "$SEED_LOCATION_URL"
+        --header "Authorization: Bearer $SEED_TOKEN"
+        --output "$EVIDENCE_DIR/seed-location.json"
+        --write-out '%{http_code}'
+      )
+      while [ "$(date +%s)" -lt "$SEED_DEADLINE" ]; do
+        sleep "$SEED_RETRY_AFTER"
+        SEED_LOCATION_STATUS="$(curl "${SEED_LOCATION_CURL[@]}")"
+        case "$SEED_LOCATION_STATUS" in
+          200|201|204) break ;;
+          202) ;;
+          *)
+            printf 'Exact policy seed result poll returned HTTP %s\n' \
+              "$SEED_LOCATION_STATUS" >&2
+            exit 1
+            ;;
+        esac
+      done
+      case "$SEED_LOCATION_STATUS" in
+        200|201|204) ;;
+        *) exit 1 ;;
       esac
-    done
-    test "${SEED_OPERATION_STATUS,,}" = "succeeded"
+      unset SEED_LOCATION_CURL
+    fi
     ;;
   *)
     printf 'Exact policy seed returned HTTP %s\n' "$SEED_HTTP_STATUS" >&2
     exit 1
     ;;
 esac
+unset SEED_TOKEN SEED_CURL
 
 wait_for_seeded_policy() {
   for _ in $(seq 1 60); do
@@ -419,7 +475,7 @@ jq -S '.properties | del(.protectedItemsCount, .resourceGuardOperationRequests, 
   "$EVIDENCE_DIR/post.json" > "$EVIDENCE_DIR/post-nontiering.json"
 diff -u "$EVIDENCE_DIR/pre-nontiering.json" "$EVIDENCE_DIR/post-nontiering.json"
 
-SUB_POLICY_URL="https://management.azure.com$RG_SCOPE/providers/Microsoft.RecoveryServices/vaults/$SUB_VAULT/backupPolicies/$POLICY?api-version=2025-08-01"
+SUB_POLICY_URL="$ARM$RG_SCOPE/providers/Microsoft.RecoveryServices/vaults/$SUB_VAULT/backupPolicies/$POLICY?api-version=2025-08-01"
 for policy_url in "$POLICY_URL" "$SUB_POLICY_URL"; do
   test "$(az rest --method get --url "$policy_url" \
     --query properties.tieringPolicy.ArchivedRP.tieringMode -o tsv)" = "TierRecommended"
@@ -439,9 +495,10 @@ jq -e '
   .properties.state == "Published" and
   .properties.runtimeEnvironment == "PowerShell74"
 ' "$EVIDENCE_DIR/runbook.json" > /dev/null
-REMOTE_RUNBOOK_SHA="$(az rest --method get \
+az rest --method get \
   --url "$RUNBOOK_URL/content?api-version=2023-11-01" \
-  --output tsv | tr -d '\r' | sha256sum | cut -d' ' -f1)"
+  --output-file "$EVIDENCE_DIR/runbook-content.ps1"
+REMOTE_RUNBOOK_SHA="$(sha256sum "$EVIDENCE_DIR/runbook-content.ps1" | cut -d' ' -f1)"
 test "$REMOTE_RUNBOOK_SHA" = "$EXPECTED_RUNBOOK_SHA"
 
 test "$(az rest --method get \
@@ -455,12 +512,10 @@ az rest --method get --url "$AA_BASE/jobs?api-version=2024-10-23" \
   --output json > "$EVIDENCE_DIR/jobs.json"
 jq -e '
   [.value[] | select(
-    .properties.status == "New" or
-    .properties.status == "Activating" or
-    .properties.status == "Queued" or
-    .properties.status == "Running" or
-    .properties.status == "Resuming" or
-    .properties.status == "Stopping"
+    .properties.status != "Completed" and
+    .properties.status != "Failed" and
+    .properties.status != "Stopped" and
+    .properties.status != "Suspended"
   )] | length == 0
 ' "$EVIDENCE_DIR/jobs.json" > /dev/null
 

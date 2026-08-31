@@ -6,6 +6,7 @@
 # Needs: az CLI logged in with Contributor on the Automation Account's resource group. Exits non-zero on
 # any mismatch, so it is safe to use in a release pipeline.
 set -euo pipefail
+umask 077
 : "${SUBSCRIPTION_ID:?set SUBSCRIPTION_ID}" "${RESOURCE_GROUP:?set RESOURCE_GROUP}" "${AUTOMATION_ACCOUNT:?set AUTOMATION_ACCOUNT}"
 RUNBOOK_NAME=${RUNBOOK_NAME:-Enable-SmartTiering}; RUNTIME_ENVIRONMENT=${RUNTIME_ENVIRONMENT:-PowerShell74}; RUNBOOK_FILE=${RUNBOOK_FILE:-src/Enable-SmartTiering.ps1}; LOCATION=${LOCATION:-}
 ARM=https://management.azure.com; BASE="$ARM/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Automation/automationAccounts/$AUTOMATION_ACCOUNT"
@@ -34,11 +35,14 @@ echo "runtime environment linked"
 az automation runbook publish --subscription "$SUBSCRIPTION_ID" --resource-group "$RESOURCE_GROUP" --automation-account-name "$AUTOMATION_ACCOUNT" --name "$RUNBOOK_NAME" -o none 2>/dev/null
 echo "publish request completed"
 # 5 wait for publication to converge, then fetch back and compare
+REMOTE_CONTENT=$(mktemp)
+trap 'rm -f "$REMOTE_CONTENT"' EXIT
 STATE=""; REMOTE_RUNTIME=""; REMOTE_SHA=""
 for _ in $(seq 1 60); do
   STATE=$(az rest --method get --url "$BASE/runbooks/$RUNBOOK_NAME?api-version=2024-10-23" --query properties.state -o tsv)
   REMOTE_RUNTIME=$(az rest --method get --url "$BASE/runbooks/$RUNBOOK_NAME?api-version=2024-10-23" --query properties.runtimeEnvironment -o tsv)
-  if REMOTE_SHA=$(az rest --method get --url "$BASE/runbooks/$RUNBOOK_NAME/content?api-version=2023-11-01" -o tsv 2>/dev/null | tr -d '\r' | sha256sum | cut -c1-64); then
+  if az rest --method get --url "$BASE/runbooks/$RUNBOOK_NAME/content?api-version=2023-11-01" --output-file "$REMOTE_CONTENT" 2>/dev/null; then
+    REMOTE_SHA=$(sha256sum "$REMOTE_CONTENT" | cut -c1-64)
     if [ "$STATE" = "Published" ] && [ "$REMOTE_RUNTIME" = "$RUNTIME_ENVIRONMENT" ] && [ "$REMOTE_SHA" = "$LOCAL_SHA" ]; then
       break
     fi

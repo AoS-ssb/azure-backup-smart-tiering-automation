@@ -106,6 +106,7 @@ intentionally excluded.
   isolated test resources.
 - Permission to create an Automation Account, Recovery Services vaults, custom roles and role
   assignments.
+- Bash 4 or newer and GNU coreutils (`sort -V` and `sha256sum`).
 - Azure CLI 2.75.0 or newer with the experimental `automation` extension pinned
   to the qualified version `1.0.0b2`.
 - A PowerShell 7.4 Runtime Environment in Azure Automation (no packages required).
