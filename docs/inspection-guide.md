@@ -1,17 +1,39 @@
 # Inspecting a deployed Automation Account
 
-This repository does not contain tenant-specific Azure Portal links or resource IDs. From any authenticated workstation, including a homelab host:
+This repository contains no tenant-specific Azure Portal links or resource IDs. For the full Azure
+Policy + Azure Automation inspection path, use the
+[canonical combined guide](https://github.com/kevo099/azure-enterprise-policy-baseline/blob/main/docs/REPLICATE-POLICY-AUTOMATION.md).
+
+From an authenticated workstation:
 
 1. Open the Azure Portal and select the subscription containing the deployment.
-2. Open the resource group used for the test environment.
-3. Select the Automation Account.
-4. Open **Runbooks** → **Enable-SmartTiering**.
-5. Open **Jobs** to review audit, apply, and idempotence output.
-6. Open **Identity** to confirm the system-assigned managed identity.
-7. Open **Schedules** to confirm whether a recurring job exists. The reference deployment creates none.
-8. Open **Access control (IAM)** to inspect the discovery-reader and policy-writer assignment scopes.
-9. Open each Recovery Services vault → **Backup policies** → the canary policy to inspect `TierRecommended`.
+2. Open the retained canary resource group.
+3. Select the Automation Account, then **Runbooks** → **Enable-SmartTiering**.
+4. Confirm the runbook is **Published** and its runtime environment is **PowerShell74**.
+5. Open **Jobs** and inspect the completed audit, apply, and repeat jobs.
+6. In jobs that reached the result section, confirm the last output line is `SUMMARY {...}`:
+   - audit: candidates/submitted/verified = `1/0/0`;
+   - apply: `1/1/1`, with zero failed or unknown writes;
+   - repeat: `0/0/0` and an `AlreadyCompliant` row.
+7. Open **Identity** and confirm a system-assigned managed identity exists.
+8. Open **Access control (IAM)** and confirm the RG-scoped discovery reader remains while the
+   policy-remediator writer assignment is absent.
+9. Open **Schedules** and confirm there are zero schedules and zero linked job schedules.
+10. Open each Recovery Services vault → **Backup policies** → the canary policy. Confirm
+    `TierRecommended` and zero protected items.
 
-The reference validation leaves policies with zero protected items. It proves the control-plane path, not actual recovery-point movement into archive storage.
+Compare the published content SHA-256 with `sha256sum src/Enable-SmartTiering.ps1` from the exact
+commit deployed. `scripts/publish-runbook.sh` performs a fetch-back byte comparison during
+publication; retain its success output locally with the source commit.
 
-Version 1.1 additions: compare the SHA-256 of the published runbook content (Runbooks → **Enable-SmartTiering** → **Edit** → copy) with `sha256sum src/Enable-SmartTiering.ps1` for the commit you deployed, and read the `SUMMARY` line of each job for `runbookVersion`, `candidates`, `policiesWritten`, `writesSubmitted`, `writesUnknown` and `abortReason`.
+Not every failed job has a `SUMMARY`. Parameter validation, managed-identity initialization, and a
+top-level vault-list failure occur before the result section. In particular, the optional no-reader
+test is expected to be Failed before any policy PUT, with its cause in the Error stream and no
+summary. It may stop during token/context initialization or at the vault read. A reader-only apply
+reaches the handled write path and does have a summary:
+`writesSubmitted=1`, `writesFailed=1`, `policiesWritten=0`.
+
+The reference validation leaves zero protected items. It proves discovery, authorization,
+full-policy update, verification, and idempotence; it does not prove actual recovery-point movement
+into archive storage. Do not publish copied Portal URLs or raw job streams because they contain
+subscription, resource, principal, and job identifiers.

@@ -56,4 +56,10 @@ foreach ($marker in $forbiddenMarkers) {
     }
 }
 
+$trapRegression = Join-Path $PSScriptRoot 'ReplicationGuideTrapTest.sh'
+& bash $trapRegression
+if ($LASTEXITCODE -ne 0) {
+    throw "Replication-guide writer EXIT trap regression failed with status $LASTEXITCODE."
+}
+
 Write-Output 'PowerShell parsing and static safety checks passed.'

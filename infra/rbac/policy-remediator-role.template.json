@@ -1,5 +1,5 @@
 {
-  "Name": "Azure Backup Smart Tiering Policy Remediator",
+  "Name": "Azure Backup Smart Tiering Policy Remediator - <role-suffix>",
   "IsCustom": true,
   "Description": "Can read Recovery Services vaults and read/update backup policies for enable-only Smart Tiering automation. Note: backupPolicies/write is full policy-update authority - a policy write can change schedules and retention and therefore the lifetime of recovery points. The role grants no direct delete action; NotActions cannot restrict permissions granted elsewhere. Assign it at the narrowest scope that contains the target policies.",
   "Actions": [

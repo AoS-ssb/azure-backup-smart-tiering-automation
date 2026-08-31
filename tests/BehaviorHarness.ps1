@@ -373,8 +373,8 @@ function Format-Metrics([AllowNull()][object] $Summary) {
     return (($values -join '/')+"/$abort")
 }
 
-$isLegacyRunbook=$false;$legacyControlPath='/home/kevo/codex-debate-smart-tiering-20260825/repo/src/Enable-SmartTiering.ps1'
-if((Test-Path -LiteralPath $RunbookPath) -and (Test-Path -LiteralPath $legacyControlPath)){try{$resolvedRunbook=(Resolve-Path -LiteralPath $RunbookPath).Path;$resolvedControl=(Resolve-Path -LiteralPath $legacyControlPath).Path;$command=Get-Command -Name $RunbookPath -ErrorAction Stop;$isLegacyRunbook=($resolvedRunbook -ceq $resolvedControl -and -not $command.Parameters.ContainsKey('AllowUnfilteredApply'))}catch{}}
+$isLegacyRunbook=$false;$legacyControlPath=$env:SMART_TIERING_LEGACY_RUNBOOK
+if(-not [string]::IsNullOrWhiteSpace($legacyControlPath) -and (Test-Path -LiteralPath $RunbookPath) -and (Test-Path -LiteralPath $legacyControlPath)){try{$resolvedRunbook=(Resolve-Path -LiteralPath $RunbookPath).Path;$resolvedControl=(Resolve-Path -LiteralPath $legacyControlPath).Path;$command=Get-Command -Name $RunbookPath -ErrorAction Stop;$isLegacyRunbook=($resolvedRunbook -ceq $resolvedControl -and -not $command.Parameters.ContainsKey('AllowUnfilteredApply'))}catch{}}
 
 function Invoke-Case([object] $Case) {
     $global:MockState=New-MockState $Case;$records=[Collections.Generic.List[object]]::new();$thrown=$null

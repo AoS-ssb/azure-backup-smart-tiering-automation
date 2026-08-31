@@ -79,6 +79,7 @@ infra/rbac/*.template.json                Portable custom-role definitions
 tests/StaticValidation.ps1                Parser and safety-marker checks
 tests/BehaviorHarness.ps1                 Behavioural harness: real runbook + mocked ARM (45 scenarios)
 scripts/publish-runbook.sh                Publish + link runtime + fetch-back hash check (release pipeline safe)
+scripts/discovery-role.sh                 Grant / revoke the RG-scoped discovery reader role
 scripts/ring-role.sh                      Grant / revoke the ring-scoped policy remediator role
 docs/replicate-in-azure.md                Step-by-step replication with the checkpoint expected at each step
 docs/gotchas.md                           Everything that bit us — read before the first Apply=true
@@ -93,7 +94,10 @@ Raw subscription IDs, principal IDs, role-assignment IDs, job IDs and live Porta
 intentionally excluded.
 
 > **Replicating this?** Follow [docs/replicate-in-azure.md](docs/replicate-in-azure.md) end to end and read
-> [docs/gotchas.md](docs/gotchas.md) first. The sections below are the reference behind those two pages.
+> [docs/gotchas.md](docs/gotchas.md) first. To reproduce the retained Azure Policy + Azure Automation
+> showcase together, use the
+> [canonical combined guide](https://github.com/kevo099/azure-enterprise-policy-baseline/blob/main/docs/REPLICATE-POLICY-AUTOMATION.md).
+> The sections below are the reference behind those guides.
 
 ## Prerequisites
 
@@ -102,13 +106,19 @@ intentionally excluded.
   isolated test resources.
 - Permission to create an Automation Account, Recovery Services vaults, custom roles and role
   assignments.
-- Azure CLI with the `automation` extension.
+- Bash 4 or newer and GNU coreutils (`sort -V` and `sha256sum`).
+- Azure CLI 2.75.0 or newer with the experimental `automation` extension pinned
+  to the qualified version `1.0.0b2`.
 - A PowerShell 7.4 Runtime Environment in Azure Automation (no packages required).
 - A deliberate RBAC and change-approval decision before applying beyond a canary resource group.
 
 ```bash
+set -euo pipefail
 az login
-az extension add --name automation --upgrade
+AZ_CLI_VERSION="$(az version --query '"azure-cli"' -o tsv)"
+test "$(printf '%s\n' 2.75.0 "$AZ_CLI_VERSION" | sort -V | head -1)" = "2.75.0"
+az extension add --name automation --version 1.0.0b2 --upgrade --yes
+test "$(az extension show --name automation --query version -o tsv)" = "1.0.0b2"
 ```
 
 ## Deploy the empty test fixture
@@ -118,29 +128,48 @@ incremental: if a vault or policy with the same name already exists it will be *
 so use names that do not exist anywhere in the subscription.
 
 ```bash
-az group create \
-  --subscription <subscription-id> \
-  --name <test-resource-group> \
-  --location <azure-region>
+set -euo pipefail
+SUBSCRIPTION_ID="<subscription-id>"
+TEST_RESOURCE_GROUP="<test-resource-group>"
+AZURE_REGION="<azure-region>"
+RG_CANARY_VAULT="<rg-canary-vault>"
+SUBSCRIPTION_CANARY_VAULT="<subscription-canary-vault>"
+AUTOMATION_ACCOUNT="<automation-account>"
 
-# Fails if the group already contains resources.
-test "$(az resource list --resource-group <test-resource-group> --query 'length(@)' -o tsv)" = "0"
+test "$(az group exists \
+  --subscription "$SUBSCRIPTION_ID" \
+  --name "$TEST_RESOURCE_GROUP")" = "false"
+
+az group create \
+  --subscription "$SUBSCRIPTION_ID" \
+  --name "$TEST_RESOURCE_GROUP" \
+  --location "$AZURE_REGION" \
+  --output none
+
+# Fails if the newly created group is not still empty in the exact subscription.
+test "$(az resource list \
+  --subscription "$SUBSCRIPTION_ID" \
+  --resource-group "$TEST_RESOURCE_GROUP" \
+  --query 'length(@)' -o tsv)" = "0"
 
 az deployment group create \
-  --subscription <subscription-id> \
-  --resource-group <test-resource-group> \
+  --subscription "$SUBSCRIPTION_ID" \
+  --resource-group "$TEST_RESOURCE_GROUP" \
   --template-file infra/test-environment.bicep \
   --parameters \
-    resourceGroupScopeVaultName=<rg-canary-vault> \
-    subscriptionScopeVaultName=<subscription-canary-vault> \
-    automationAccountName=<automation-account> \
+    resourceGroupScopeVaultName="$RG_CANARY_VAULT" \
+    subscriptionScopeVaultName="$SUBSCRIPTION_CANARY_VAULT" \
+    automationAccountName="$AUTOMATION_ACCOUNT" \
     backupPolicyName=smart-tiering-remediation-canary \
     testPolicyTieringMode=TierRecommended \
-    retainForInspection=false
+    retainForInspection=true \
+  --output none
 ```
 
-`testPolicyTieringMode=TierRecommended` is the safe redeploy default: the canary policies start
-compliant and an apply run is a no-op. Use the **mutation track** below to seed a real write.
+`testPolicyTieringMode=TierRecommended` leaves both canary policies compliant. The replication guide
+fetches one exact zero-item policy and seeds only its archive-tier block for the write proof. Do not
+re-run the full fixture merely to change a retained policy: Azure-added defaults can introduce an
+unrelated update diff.
 
 The Bicep file creates the Automation Account, the PowerShell 7.4 runtime environment, two empty
 vaults and one canary policy in each vault. It does **not** import the runbook or create RBAC
@@ -152,24 +181,24 @@ definitions/assignments. Each new vault also receives service-created default po
 
 ```bash
 az automation runbook create \
-  --subscription <subscription-id> \
-  --resource-group <test-resource-group> \
-  --automation-account-name <automation-account> \
+  --subscription "<subscription-id>" \
+  --resource-group "<test-resource-group>" \
+  --automation-account-name "<automation-account>" \
   --name Enable-SmartTiering \
   --type PowerShell \
-  --location <azure-region>
+  --location "<azure-region>"
 
 az automation runbook replace-content \
-  --subscription <subscription-id> \
-  --resource-group <test-resource-group> \
-  --automation-account-name <automation-account> \
+  --subscription "<subscription-id>" \
+  --resource-group "<test-resource-group>" \
+  --automation-account-name "<automation-account>" \
   --name Enable-SmartTiering \
   --content @src/Enable-SmartTiering.ps1
 
 az automation runbook publish \
-  --subscription <subscription-id> \
-  --resource-group <test-resource-group> \
-  --automation-account-name <automation-account> \
+  --subscription "<subscription-id>" \
+  --resource-group "<test-resource-group>" \
+  --automation-account-name "<automation-account>" \
   --name Enable-SmartTiering
 ```
 
@@ -177,25 +206,27 @@ Link the runbook to the `PowerShell74` runtime environment (the Portal, or the A
 `PATCH .../runbooks/Enable-SmartTiering?api-version=2024-10-23` with
 `{"properties":{"runtimeEnvironment":"PowerShell74"}}`), and record the SHA-256 of the file you
 published so the job evidence can be tied to a commit. `scripts/publish-runbook.sh` does all of this in one
-go and exits non-zero unless the fetch-back SHA-256 equals your local file:
+go, discovers the Automation Account's Azure region unless `LOCATION` is explicitly supplied, and
+exits non-zero unless the fetch-back SHA-256 equals your local file:
 
 ```bash
-SUBSCRIPTION_ID=<sub> RESOURCE_GROUP=<rg> AUTOMATION_ACCOUNT=<account> scripts/publish-runbook.sh
+SUBSCRIPTION_ID="<sub>" RESOURCE_GROUP="<rg>" AUTOMATION_ACCOUNT="<account>" scripts/publish-runbook.sh
 ```
 
 ## RBAC model
 
-Render the reader template by replacing `REPLACE_WITH_SUBSCRIPTION_ID`, and the remediator template by
-replacing `<subscription-id>` and `<ring-resource-group>` (its only assignable scope is that resource
-group), then create them with `az role definition create --role-definition @<file>` —
-`scripts/ring-role.sh grant|revoke` does the remediator half.
+For a resource-group run, `scripts/discovery-role.sh grant|revoke` renders a collision-resistant reader
+definition whose assignable scope is only that resource group. `scripts/ring-role.sh grant|revoke`
+does the temporary remediator half, also with the resource group as its only assignable scope. The
+subscription-assignable `infra/rbac/discovery-reader-role.template.json` remains available only for
+deliberate `ScopeType=Subscription` discovery.
 
 Assign:
 
 - **Azure Backup Smart Tiering Discovery Reader** — at resource-group scope for
   `ScopeType=ResourceGroup` runs; at subscription scope only when you need
   `ScopeType=Subscription` discovery.
-- **Azure Backup Smart Tiering Policy Remediator** — only at the resource group that contains the
+- **Azure Backup Smart Tiering Policy Remediator - `<scope-hash>`** — only at the resource group that contains the
   policies you intend to change.
 
 Be explicit about what the writer role is: `Microsoft.RecoveryServices/Vaults/backupPolicies/write`
@@ -226,27 +257,32 @@ assignment narrow, and treat "start runbook" permission as writer-equivalent.
 | `RequestTimeoutSeconds` | `100` | Per-request timeout |
 | `ApiVersion` | `2025-08-01` | Recovery Services API version |
 
-Every output row is one JSON object with `timestamp`, `vaultId`, `policyId`, `policyType`,
-`protectedItemsCount`, `retentionHorizonMonths`, `previousMode`, `currentMode`, `action`,
-`stage`, `operationStatus` and `message`. The last line is `SUMMARY {...}` with `policiesMatched`,
-`candidates`, `policiesWritten` (verified), `writesSubmitted`, `writesUnknown`, `writesFailed`,
-`writesSkipped`, `errors` and `abortReason`. Null values are emitted as JSON `null`. The job fails when
-apply was aborted, when any error occurred, when any write has an unknown outcome, or when the job
-time budget stopped it — never silently.
+Every result row is one JSON object with `timestamp`, `vaultId`, `policyId`, `policyType`,
+`protectedItemsCount`, `retentionHorizonMonths`, `previousMode`, `currentMode`, `action`, `stage`,
+`operationStatus` and `message`. Once execution reaches the result section, the last output line is
+`SUMMARY {...}` with `policiesMatched`, `candidates`, `policiesWritten` (verified),
+`writesSubmitted`, `writesUnknown`, `writesFailed`, `writesSkipped`, `errors` and `abortReason`.
+Null values are emitted as JSON `null`.
+
+Failures before that section do not have a summary: parameter binding, script-level parameter
+validation, managed-identity token acquisition, and a top-level vault-list failure such as the
+expected no-reader 403. Use the Azure Automation job status and Error stream for those failures.
+Also distinguish an attempted request from a verified change: a reader-only apply that receives 403
+reports `writesSubmitted=1`, `writesFailed=1`, and `policiesWritten=0`.
 
 ## Run audit first
 
 ```bash
 az automation runbook start \
-  --subscription <subscription-id> \
-  --resource-group <test-resource-group> \
-  --automation-account-name <automation-account> \
+  --subscription "<subscription-id>" \
+  --resource-group "<test-resource-group>" \
+  --automation-account-name "<automation-account>" \
   --name Enable-SmartTiering \
   --parameters \
-    SubscriptionId=<subscription-id> \
+    SubscriptionId="<subscription-id>" \
     ScopeType=ResourceGroup \
-    ResourceGroupName=<test-resource-group> \
-    VaultName=<rg-canary-vault> \
+    ResourceGroupName="<test-resource-group>" \
+    VaultName="<rg-canary-vault>" \
     PolicyName=smart-tiering-remediation-canary \
     Apply=false
 ```
@@ -265,25 +301,12 @@ No recurring schedule is created by this repository.
 
 ## Mutation canary track (`DoNotTier` → `TierRecommended`)
 
-The safe redeploy leaves the canary policies compliant, so an apply run cannot demonstrate a
-write. To exercise a real write on an empty policy:
-
-```bash
-az deployment group create \
-  --subscription <subscription-id> \
-  --resource-group <test-resource-group> \
-  --template-file infra/test-environment.bicep \
-  --parameters \
-    resourceGroupScopeVaultName=<rg-canary-vault> \
-    subscriptionScopeVaultName=<subscription-canary-vault> \
-    automationAccountName=<automation-account> \
-    backupPolicyName=smart-tiering-remediation-canary \
-    testPolicyTieringMode=DoNotTier
-```
-
-Then run audit → apply → apply again as above and expect `WouldEnableTierRecommended` →
-`EnabledAndVerified` (`writesSubmitted=1`, `policiesWritten=1`) → `AlreadyCompliant`
-(`policiesWritten=0`).
+Do not redeploy the full retained fixture to seed a write. Follow the exact-policy GET → sanitized
+PUT procedure in [docs/replicate-in-azure.md](docs/replicate-in-azure.md). It first requires
+`protectedItemsCount=0`, removes read-only response members, changes only
+`tieringPolicy.ArchivedRP`, and records a pre/post non-tiering diff. Then run audit → bounded apply →
+apply again and expect `WouldEnableTierRecommended` → `EnabledAndVerified`
+(`writesSubmitted=1`, `policiesWritten=1`) → `AlreadyCompliant` (`policiesWritten=0`).
 
 ## Teardown
 
@@ -291,12 +314,13 @@ The fixture holds no backup data, so deleting the resource group is safe. Remove
 assignments and definitions you created if nothing else uses them:
 
 ```bash
-az role assignment delete --assignee <automation-account-principal-id> --role "Azure Backup Smart Tiering Policy Remediator" --scope /subscriptions/<subscription-id>/resourceGroups/<test-resource-group>
-az role assignment delete --assignee <automation-account-principal-id> --role "Azure Backup Smart Tiering Discovery Reader" --scope /subscriptions/<subscription-id>
-az group delete --name <test-resource-group> --yes --no-wait
-az role definition delete --name "Azure Backup Smart Tiering Policy Remediator"
-az role definition delete --name "Azure Backup Smart Tiering Discovery Reader"
+scripts/ring-role.sh revoke "<subscription-id>" "<test-resource-group>" "<automation-account-principal-id>"
+scripts/discovery-role.sh revoke "<subscription-id>" "<test-resource-group>" "<automation-account-principal-id>"
+az group delete --subscription "<subscription-id>" --name "<test-resource-group>" --yes --no-wait
 ```
+
+The replication guide's default handoff does not run this teardown: it removes only writer access
+and leaves the read-only inspection resources alive.
 
 ## What has been validated
 
@@ -315,6 +339,10 @@ az role definition delete --name "Azure Backup Smart Tiering Discovery Reader"
   → `TierRecommended` apply with post-write verification, idempotent repeat, and the whitespace /
   unfiltered / misspelled-name guards all failing closed before any write — as an additional runbook in
   the same Automation Account. Details in [docs/validation.md](docs/validation.md).
+- **1.1, fresh live replica (2026-08-31):** published bytes matched source, RG-only audit → bounded
+  apply → idempotent repeat produced `1/0/0` → `1/1/1` → `0/0/0` candidates/submitted/verified,
+  non-tiering pre/post hashes matched, and the writer was removed while the reader-only showcase was
+  retained. The no-reader 403 also exposed the pre-summary failure boundary documented above.
 
 ## Important limitations
 

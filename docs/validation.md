@@ -115,3 +115,25 @@ sandbox against real ARM responses. What it still does not prove: the `202` asyn
 live write completed synchronously with HTTP 200), tagged policies, V2/hourly writes, protected
 items, Resource Guard/MUA, throttling, or archive movement — those remain harness-only and are listed
 as required canaries in `docs/design-and-limitations.md`.
+
+## 1.1 — fresh replica qualification (2026-08-31)
+
+A new Automation Account, `PowerShell74` runtime, two empty vaults, and two zero-item canary policies
+were deployed in a new resource group. The published runbook was fetched back byte-for-byte and its
+SHA-256 matched the public source (`2cef45acc81b04a6bbcd62582db6f974102ae98f2de79231a90907f49a7dd555`).
+No tenant, subscription, resource, principal, role-assignment, or job identifier is retained here.
+
+| Phase | Result |
+|---|---|
+| No-reader negative | Job Failed on the top-level vault-list permission with HTTP 403; no policy write was reachable. Because the exception occurred before the result section, there was no `SUMMARY` line. |
+| Exact seed | The target policy was required to have zero protected items, then a sanitized full-document PUT changed only the `ArchivedRP` tiering block from `TierRecommended` to `DoNotTier`. |
+| Audit | Completed; `WouldEnableTierRecommended`; candidates/submitted/verified = `1/0/0`; zero errors. |
+| Bounded apply | Completed; `EnabledAndVerified`; candidates/submitted/verified = `1/1/1`; synchronous HTTP 200; zero failed or unknown writes. |
+| Idempotent repeat | Completed; `AlreadyCompliant`; candidates/submitted/verified = `0/0/0`; zero errors. |
+| Content verification | Canonical full pre/post policy SHA-256 values matched after the canary returned to `TierRecommended`; the independently calculated non-tiering SHA-256 values also matched. |
+| Final access | The temporary policy-remediator assignment was removed. Only the RG-scoped discovery reader remained on the Automation identity. |
+| Final platform state | Runbook Published on `PowerShell74`; both canaries `TierRecommended` with zero protected items; zero schedules, zero linked job schedules, and zero active jobs. |
+
+This fresh run confirms that the public fixture and publishing path can be reproduced in a new
+scope, including least-privilege cleanup and a retained read-only inspection state. It also corrects
+the earlier documentation assumption that every runbook failure emits a structured summary.

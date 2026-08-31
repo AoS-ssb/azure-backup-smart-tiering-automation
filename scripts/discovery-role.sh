@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Grant or revoke the temporary writer role for one ring (the resource group of the vault whose policy you will change). The role definition is created with that
-# scope as its only assignable scope and removed again on revoke.
-# Usage: scripts/ring-role.sh grant|revoke <subscription-id> <ring-resource-group> <automation-identity-principal-id>
-# Needs: Owner or User Access Administrator on the ring resource group (roleDefinitions/write + roleAssignments/write).
+# Grant or revoke the read-only discovery role for one resource-group ring.
+# Usage: scripts/discovery-role.sh grant|revoke <subscription-id> <ring-resource-group> <automation-identity-principal-id>
+# Needs: Owner or User Access Administrator on the ring resource group to create/delete the custom
+# role definition and role assignment. The role name gets a deterministic scope suffix so multiple
+# isolated rings in the same tenant do not collide.
 set -euo pipefail
 umask 077
 ACTION=${1:?grant|revoke}; SUB=${2:?subscription id}; RG=${3:?ring resource group}; PRINCIPAL=${4:?principal id of the Automation Account identity}
-SCOPE="/subscriptions/$SUB/resourceGroups/$RG"; ROLE_SUFFIX=$(printf '%s' "$SCOPE" | sha256sum | cut -c1-12); ROLE="Azure Backup Smart Tiering Policy Remediator - $ROLE_SUFFIX"; TEMPLATE="$(dirname "$0")/../infra/rbac/policy-remediator-role.template.json"
+SCOPE="/subscriptions/$SUB/resourceGroups/$RG"; ROLE_SUFFIX=$(printf '%s' "$SCOPE" | sha256sum | cut -c1-12); ROLE="Azure Backup Smart Tiering Discovery Reader - $ROLE_SUFFIX"; TEMPLATE="$(dirname "$0")/../infra/rbac/discovery-reader-rg-role.template.json"
 case "$ACTION" in
   grant)
     RENDERED=$(mktemp)
@@ -109,23 +110,23 @@ case "$ACTION" in
     }
     trap cleanup_grant EXIT
 
-    sed "s#<subscription-id>#$SUB#; s#<ring-resource-group>#$RG#; s#<role-suffix>#$ROLE_SUFFIX#; s#REPLACE_WITH_SUBSCRIPTION_ID#$SUB#" "$TEMPLATE" > "$RENDERED"
+    sed "s#<subscription-id>#$SUB#; s#<ring-resource-group>#$RG#; s#<role-suffix>#$ROLE_SUFFIX#" "$TEMPLATE" > "$RENDERED"
 
     if ! az role definition list --subscription "$SUB" --custom-role-only true --scope "$SCOPE" -o json > "$ACTUAL" 2>/dev/null; then
-      echo "unable to inspect the policy-remediator role definition" >&2
+      echo "unable to inspect the discovery role definition" >&2
       exit 1
     fi
     ROLE_COUNT=$(jq -r --arg role "$ROLE" '[.[] | select(((.roleName // "") | ascii_downcase) == ($role | ascii_downcase))] | length' "$ACTUAL")
     case "$ROLE_COUNT" in
       0)
         if ! az role definition create --subscription "$SUB" --role-definition @"$RENDERED" -o json > "$ROLE_RESULT" 2>/dev/null; then
-          echo "unable to create the RG-scoped policy-remediator role definition" >&2
+          echo "unable to create the RG-scoped discovery role definition" >&2
           exit 1
         fi
         ROLE_CREATED=true
         ROLE_ID=$(jq -r '.name // empty' "$ROLE_RESULT")
         if [ -z "$ROLE_ID" ]; then
-          echo "created policy-remediator role definition returned no stable identifier" >&2
+          echo "created discovery role definition returned no stable identifier" >&2
           exit 1
         fi
         ROLE_READY=false
@@ -138,20 +139,20 @@ case "$ACTION" in
           sleep 5
         done
         if [ "$ROLE_READY" != true ]; then
-          echo "created policy-remediator role definition did not become visible with the expected shape" >&2
+          echo "created discovery role definition did not become visible with the expected shape" >&2
           exit 1
         fi
-        echo "RG-scoped policy-remediator role definition created"
+        echo "RG-scoped discovery role definition created"
         ;;
       1)
         if ! role_matches_template; then
-          echo "existing policy-remediator role does not match the RG-only template" >&2
+          echo "existing discovery role does not match the RG-only template" >&2
           exit 1
         fi
         echo "role definition exists"
         ;;
       *)
-        echo "policy-remediator role definition name is ambiguous" >&2
+        echo "discovery role definition name is ambiguous" >&2
         exit 1
         ;;
     esac
@@ -165,7 +166,7 @@ case "$ACTION" in
       sleep 5
     done
     if [ "$ASSIGNMENT_LIST_READY" != true ]; then
-      echo "unable to inspect the policy-remediator role assignment" >&2
+      echo "unable to inspect the discovery role assignment" >&2
       exit 1
     fi
     ASSIGNMENT_COUNT=$(jq -r 'length' "$ASSIGNMENTS")
@@ -190,16 +191,16 @@ case "$ACTION" in
           sleep 5
         done
         if [ "$ASSIGNMENT_CREATED" != true ]; then
-          echo "RG-scoped policy-remediator role assignment did not become creatable" >&2
+          echo "RG-scoped discovery role assignment did not become creatable" >&2
           exit 1
         fi
-        echo "RG-scoped policy-remediator role assignment created"
+        echo "RG-scoped discovery role assignment created"
         ;;
       1)
         echo "role assignment exists"
         ;;
       *)
-        echo "policy-remediator role assignment is ambiguous" >&2
+        echo "discovery role assignment is ambiguous" >&2
         exit 1
         ;;
     esac
@@ -214,10 +215,10 @@ case "$ACTION" in
       sleep 5
     done
     if [ "$ASSIGNMENT_READY" != true ]; then
-      echo "policy-remediator role assignment did not converge to exactly one match" >&2
+      echo "discovery role assignment did not converge to exactly one match" >&2
       exit 1
     fi
-    echo "RBAC can take several minutes to propagate; a write refused with 403 before then is reported as Forbidden and nothing is changed."
+    echo "RBAC can take several minutes to propagate; a job started too early fails closed with 403."
     trap - EXIT
     rm -f "$RENDERED" "$ACTUAL" "$ASSIGNMENTS" "$ROLE_RESULT"
     ;;
@@ -253,6 +254,7 @@ case "$ACTION" in
       [ -z "$(az role definition list --subscription "$SUB" --custom-role-only true --scope "$SCOPE" --query "[?roleName=='$ROLE'].roleName" -o tsv)" ] && break
       sleep 5
     done
-    test -z "$(az role definition list --subscription "$SUB" --custom-role-only true --scope "$SCOPE" --query "[?roleName=='$ROLE'].roleName" -o tsv)" ;;
+    test -z "$(az role definition list --subscription "$SUB" --custom-role-only true --scope "$SCOPE" --query "[?roleName=='$ROLE'].roleName" -o tsv)"
+    ;;
   *) echo "usage: $0 grant|revoke <subscription-id> <ring-resource-group> <principal-id>" >&2; exit 2 ;;
 esac
