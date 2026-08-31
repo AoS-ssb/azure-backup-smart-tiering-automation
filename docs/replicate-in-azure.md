@@ -161,7 +161,8 @@ start_job() {
 
 wait_job() {
   local job="$1" status
-  for _ in $(seq 1 240); do
+  local deadline="${2:-$(( $(date +%s) + 1200 ))}"
+  while [ "$(date +%s)" -lt "$deadline" ]; do
     status="$(az rest --method get \
       --url "$AA_BASE/jobs/$job?api-version=2024-10-23" \
       --query properties.status -o tsv)"
@@ -177,13 +178,14 @@ wait_job() {
 WRITER_GRANTED=false
 revoke_writer_on_exit() {
   local original_status=$?
+  trap - EXIT
   if [ "$WRITER_GRANTED" = true ]; then
     if ! "$AUTOMATION_DIR/scripts/ring-role.sh" revoke "$SUB" "$RG" "$PRINCIPAL"; then
       printf 'Automatic writer-role revocation failed; revoke it manually now\n' >&2
-      return 1
+      exit 1
     fi
   fi
-  return "$original_status"
+  exit "$original_status"
 }
 trap revoke_writer_on_exit EXIT
 
@@ -196,6 +198,16 @@ job_streams() {
   az rest --method get \
     --url "$AA_BASE/jobs/$1/streams?api-version=2024-10-23" \
     --query 'value[].{time:properties.time,type:properties.streamType,text:properties.summary}' -o table
+}
+
+single_summary() {
+  local output_file="$1" count
+  count="$(grep -c '^SUMMARY ' "$output_file" || true)"
+  if [ "$count" != "1" ]; then
+    printf 'Expected exactly one SUMMARY line in %s; found %s\n' "$output_file" "$count" >&2
+    return 1
+  fi
+  sed -n 's/^SUMMARY //p' "$output_file"
 }
 ```
 
@@ -225,14 +237,69 @@ assigns it to the Automation identity:
 scripts/discovery-role.sh grant "$SUB" "$RG" "$PRINCIPAL"
 ```
 
-Allow for RBAC propagation. Then fetch the exact policy, require zero protected items, construct a
-write payload without read-only members, and change only the archive-tier block to `DoNotTier`.
-This direct seed is an operator action on the empty canary; it does not use the Automation writer.
+Role-assignment visibility is not proof that the managed identity can use the role. Before any
+seed, prove the exact canary is still empty and `TierRecommended`, then run read-only exact-name
+audits until one completes with the precise already-compliant result. Failed readiness jobs are
+safe to retry because `Apply=false` cannot submit a PUT; a timed-out job or an unexpected completed
+result stops the procedure. The single deadline bounds the entire readiness window.
 
 ```bash
 POLICY_ID="$RG_SCOPE/providers/Microsoft.RecoveryServices/vaults/$RG_VAULT/backupPolicies/$POLICY"
 POLICY_URL="$ARM$POLICY_ID?api-version=2025-08-01"
 
+az rest --method get --url "$POLICY_URL" > "$EVIDENCE_DIR/reader-initial.json"
+jq -e '
+  .properties.protectedItemsCount == 0 and
+  .properties.tieringPolicy.ArchivedRP.tieringMode == "TierRecommended"
+' "$EVIDENCE_DIR/reader-initial.json" > /dev/null
+
+READER_READY=false
+READER_ATTEMPT=0
+READER_DEADLINE="$(( $(date +%s) + 900 ))"
+while [ "$(date +%s)" -lt "$READER_DEADLINE" ]; do
+  READER_ATTEMPT="$((READER_ATTEMPT + 1))"
+  READER_JOB="$(start_job false)"
+  if ! READER_STATUS="$(wait_job "$READER_JOB" "$READER_DEADLINE")"; then
+    printf 'Reader readiness job did not reach a terminal state before the deadline\n' >&2
+    exit 1
+  fi
+  READER_OUTPUT="$EVIDENCE_DIR/reader-ready-$READER_ATTEMPT.output"
+  job_output "$READER_JOB" > "$READER_OUTPUT"
+  case "$READER_STATUS" in
+    Completed)
+      READER_SUMMARY="$(single_summary "$READER_OUTPUT")"
+      printf '%s\n' "$READER_SUMMARY" | jq -e '
+        .policiesMatched == 1 and
+        .candidates == 0 and
+        .writesSubmitted == 0 and
+        .policiesWritten == 0 and
+        .writesFailed == 0 and
+        .writesUnknown == 0 and
+        .errors == 0 and
+        .abortReason == null
+      ' > /dev/null
+      test "$(grep -c '"action":"AlreadyCompliant"' "$READER_OUTPUT" || true)" = "1"
+      READER_READY=true
+      break
+      ;;
+    Failed)
+      sleep 15
+      ;;
+    *)
+      printf 'Unexpected reader readiness state: %s\n' "$READER_STATUS" >&2
+      exit 1
+      ;;
+  esac
+done
+test "$READER_READY" = true
+```
+
+Only after that managed-identity read succeeds, fetch the exact policy again, require zero protected
+items, construct a write payload without read-only members, and change only the archive-tier block
+to `DoNotTier`. This direct seed is an operator action on the empty canary; it does not use the
+Automation writer.
+
+```bash
 az rest --method get --url "$POLICY_URL" > "$EVIDENCE_DIR/pre.json"
 jq -e '
   .properties.protectedItemsCount == 0 and
@@ -388,15 +455,18 @@ AUDIT_JOB="$(start_job false)"
 test "$(wait_job "$AUDIT_JOB")" = "Completed"
 job_output "$AUDIT_JOB" | tee "$EVIDENCE_DIR/audit.output"
 
-AUDIT_SUMMARY="$(sed -n 's/^SUMMARY //p' "$EVIDENCE_DIR/audit.output" | tail -1)"
+AUDIT_SUMMARY="$(single_summary "$EVIDENCE_DIR/audit.output")"
 printf '%s\n' "$AUDIT_SUMMARY" | jq -e '
+  .policiesMatched == 1 and
   .candidates == 1 and
   .writesSubmitted == 0 and
   .policiesWritten == 0 and
+  .writesFailed == 0 and
+  .writesUnknown == 0 and
   .errors == 0 and
   .abortReason == null
 ' > /dev/null
-grep -q '"action":"WouldEnableTierRecommended"' "$EVIDENCE_DIR/audit.output"
+test "$(grep -c '"action":"WouldEnableTierRecommended"' "$EVIDENCE_DIR/audit.output" || true)" = "1"
 ```
 
 ## 7. Know the guard outputs
@@ -423,44 +493,133 @@ Do not describe `writesSubmitted` as a successful change: it counts the attempte
 
 ## 8. Temporary writer, bounded apply, and idempotent repeat
 
+The grant helper rolls back only artifacts it created if propagation prevents a
+complete grant. Activate the outer EXIT cleanup immediately after it succeeds:
+
 ```bash
-WRITER_GRANTED=true
 scripts/ring-role.sh grant "$SUB" "$RG" "$PRINCIPAL"
+WRITER_GRANTED=true
 ```
 
-After RBAC propagates, run the exact-name apply. If Azure still returns 403, wait, re-run the audit
-to re-establish `WouldEnableTierRecommended`, and only then retry the bounded apply.
+Assignment visibility does not prove write authorization has propagated. Run the exact-name apply
+under one 15-minute deadline. A retry is allowed only when the failed job has exactly one valid
+summary, its counters prove one definitive rejected write and no unknown write, its sole error row
+is a write-stage HTTP 403/Forbidden/AuthorizationFailed response, and a direct policy read plus a
+fresh audit prove the policy is still `DoNotTier` and still the one intended candidate. Any other
+terminal state or output shape stops immediately.
 
 ```bash
-APPLY_JOB="$(start_job true ExpectedMatches=1 MaxChanges=1 MaxProtectedItemsPerPolicy=0)"
-test "$(wait_job "$APPLY_JOB")" = "Completed"
-job_output "$APPLY_JOB" | tee "$EVIDENCE_DIR/apply.output"
+APPLY_SUCCEEDED=false
+APPLY_ATTEMPT=0
+WRITER_DEADLINE="$(( $(date +%s) + 900 ))"
+while [ "$(date +%s)" -lt "$WRITER_DEADLINE" ]; do
+  APPLY_ATTEMPT="$((APPLY_ATTEMPT + 1))"
+  APPLY_JOB="$(start_job true ExpectedMatches=1 MaxChanges=1 MaxProtectedItemsPerPolicy=0)"
+  if ! APPLY_STATUS="$(wait_job "$APPLY_JOB" "$WRITER_DEADLINE")"; then
+    printf 'Apply job did not reach a terminal state before the writer deadline\n' >&2
+    exit 1
+  fi
+  APPLY_OUTPUT="$EVIDENCE_DIR/apply-$APPLY_ATTEMPT.output"
+  job_output "$APPLY_JOB" | tee "$APPLY_OUTPUT"
+  APPLY_SUMMARY="$(single_summary "$APPLY_OUTPUT")"
 
-APPLY_SUMMARY="$(sed -n 's/^SUMMARY //p' "$EVIDENCE_DIR/apply.output" | tail -1)"
-printf '%s\n' "$APPLY_SUMMARY" | jq -e '
-  .candidates == 1 and
-  .writesSubmitted == 1 and
-  .policiesWritten == 1 and
-  .writesFailed == 0 and
-  .writesUnknown == 0 and
-  .errors == 0 and
-  .abortReason == null
-' > /dev/null
-grep -q '"action":"EnabledAndVerified"' "$EVIDENCE_DIR/apply.output"
+  case "$APPLY_STATUS" in
+    Completed)
+      if ! printf '%s\n' "$APPLY_SUMMARY" | jq -e '
+        .policiesMatched == 1 and
+        .candidates == 1 and
+        .writesSubmitted == 1 and
+        .policiesWritten == 1 and
+        .writesFailed == 0 and
+        .writesUnknown == 0 and
+        .writesSkipped == 0 and
+        .errors == 0 and
+        .abortReason == null
+      ' > /dev/null; then
+        printf 'Completed apply had an unexpected summary; refusing to continue\n' >&2
+        exit 1
+      fi
+      test "$(grep -c '"action":"EnabledAndVerified"' "$APPLY_OUTPUT" || true)" = "1"
+      APPLY_SUCCEEDED=true
+      break
+      ;;
+    Failed)
+      if ! printf '%s\n' "$APPLY_SUMMARY" | jq -e '
+        .policiesMatched == 1 and
+        .candidates == 1 and
+        .writesSubmitted == 1 and
+        .policiesWritten == 0 and
+        .writesFailed == 1 and
+        .writesUnknown == 0 and
+        .writesSkipped == 0 and
+        .errors == 1 and
+        .abortReason == null
+      ' > /dev/null; then
+        printf 'Failed apply was not the qualified authorization-only shape\n' >&2
+        exit 1
+      fi
+      if ! jq -s -e '
+        [.[] | select(.action == "Error")] as $errors
+        | ($errors | length) == 1 and
+          $errors[0].stage == "Write" and
+          (($errors[0].message // "") | test("HTTP 403|Forbidden|AuthorizationFailed"; "i"))
+      ' < <(sed -n '/^{/p' "$APPLY_OUTPUT") > /dev/null; then
+        printf 'Failed apply did not contain exactly one writer-authorization error\n' >&2
+        exit 1
+      fi
+
+      az rest --method get --url "$POLICY_URL" > "$EVIDENCE_DIR/pre-retry-$APPLY_ATTEMPT.json"
+      jq -e '
+        .properties.protectedItemsCount == 0 and
+        .properties.tieringPolicy.ArchivedRP.tieringMode == "DoNotTier"
+      ' "$EVIDENCE_DIR/pre-retry-$APPLY_ATTEMPT.json" > /dev/null
+
+      RETRY_AUDIT_JOB="$(start_job false)"
+      if ! RETRY_AUDIT_STATUS="$(wait_job "$RETRY_AUDIT_JOB" "$WRITER_DEADLINE")"; then
+        printf 'Pre-retry audit did not reach a terminal state before the writer deadline\n' >&2
+        exit 1
+      fi
+      test "$RETRY_AUDIT_STATUS" = "Completed"
+      RETRY_AUDIT_OUTPUT="$EVIDENCE_DIR/pre-retry-audit-$APPLY_ATTEMPT.output"
+      job_output "$RETRY_AUDIT_JOB" > "$RETRY_AUDIT_OUTPUT"
+      RETRY_AUDIT_SUMMARY="$(single_summary "$RETRY_AUDIT_OUTPUT")"
+      printf '%s\n' "$RETRY_AUDIT_SUMMARY" | jq -e '
+        .policiesMatched == 1 and
+        .candidates == 1 and
+        .writesSubmitted == 0 and
+        .policiesWritten == 0 and
+        .writesFailed == 0 and
+        .writesUnknown == 0 and
+        .errors == 0 and
+        .abortReason == null
+      ' > /dev/null
+      test "$(grep -c '"action":"WouldEnableTierRecommended"' "$RETRY_AUDIT_OUTPUT" || true)" = "1"
+      sleep 15
+      ;;
+    *)
+      printf 'Unexpected apply terminal state: %s\n' "$APPLY_STATUS" >&2
+      exit 1
+      ;;
+  esac
+done
+test "$APPLY_SUCCEEDED" = true
 
 REPEAT_JOB="$(start_job true ExpectedMatches=1 MaxChanges=1 MaxProtectedItemsPerPolicy=0)"
 test "$(wait_job "$REPEAT_JOB")" = "Completed"
 job_output "$REPEAT_JOB" | tee "$EVIDENCE_DIR/repeat.output"
 
-REPEAT_SUMMARY="$(sed -n 's/^SUMMARY //p' "$EVIDENCE_DIR/repeat.output" | tail -1)"
+REPEAT_SUMMARY="$(single_summary "$EVIDENCE_DIR/repeat.output")"
 printf '%s\n' "$REPEAT_SUMMARY" | jq -e '
+  .policiesMatched == 1 and
   .candidates == 0 and
   .writesSubmitted == 0 and
   .policiesWritten == 0 and
+  .writesFailed == 0 and
+  .writesUnknown == 0 and
   .errors == 0 and
   .abortReason == null
 ' > /dev/null
-grep -q '"action":"AlreadyCompliant"' "$EVIDENCE_DIR/repeat.output"
+test "$(grep -c '"action":"AlreadyCompliant"' "$EVIDENCE_DIR/repeat.output" || true)" = "1"
 ```
 
 ## 9. Verify invariants and remove the writer
@@ -526,6 +685,15 @@ jq -e '
 scripts/ring-role.sh revoke "$SUB" "$RG" "$PRINCIPAL"
 WRITER_GRANTED=false
 
+DISCOVERY_ROLE_SUFFIX="$(printf '%s' "$RG_SCOPE" | sha256sum | cut -c1-12)"
+DISCOVERY_ROLE_NAME="Azure Backup Smart Tiering Discovery Reader - $DISCOVERY_ROLE_SUFFIX"
+sed \
+  -e "s#<subscription-id>#$SUB#" \
+  -e "s#<ring-resource-group>#$RG#" \
+  -e "s#<role-suffix>#$DISCOVERY_ROLE_SUFFIX#" \
+  infra/rbac/discovery-reader-rg-role.template.json \
+  > "$EVIDENCE_DIR/final-discovery-role-expected.json"
+
 az role assignment list \
   --subscription "$SUB" \
   --assignee-object-id "$PRINCIPAL" \
@@ -533,9 +701,9 @@ az role assignment list \
   --fill-principal-name false \
   --output json > "$EVIDENCE_DIR/final-roles.json"
 
-jq -e --arg scope "$RG_SCOPE" '
+jq -e --arg scope "$RG_SCOPE" --arg reader "$DISCOVERY_ROLE_NAME" '
   [.[] | select((.scope | ascii_downcase) == ($scope | ascii_downcase))] as $direct
-  | ([$direct[] | select(.roleDefinitionName | startswith("Azure Backup Smart Tiering Discovery Reader - "))] | length) == 1
+  | ([$direct[] | select(.roleDefinitionName == $reader)] | length) == 1
     and ([$direct[] | select(.roleDefinitionName | startswith("Azure Backup Smart Tiering Policy Remediator - "))] | length) == 0
     and ($direct | length) == 1
 ' "$EVIDENCE_DIR/final-roles.json" > /dev/null
@@ -545,9 +713,23 @@ az role definition list \
   --custom-role-only true \
   --scope "$RG_SCOPE" \
   --output json > "$EVIDENCE_DIR/final-custom-roles.json"
-jq -e '
-  [.[] | select(.roleName | startswith("Azure Backup Smart Tiering Policy Remediator - "))]
-  | length == 0
+jq -e \
+  --arg reader "$DISCOVERY_ROLE_NAME" \
+  --arg scope "$RG_SCOPE" \
+  --slurpfile expected "$EVIDENCE_DIR/final-discovery-role-expected.json" '
+  $expected[0] as $e
+  | [.[] | select(.roleName == $reader)] as $reader_roles
+  | ([$reader_roles[] | select(
+      (.description == $e.Description) and
+      ((.assignableScopes // [] | map(ascii_downcase) | sort) == [($scope | ascii_downcase)]) and
+      ((.permissions // []) | length == 1) and
+      ((.permissions[0].actions // [] | map(ascii_downcase) | sort) == ($e.Actions | map(ascii_downcase) | sort)) and
+      ((.permissions[0].notActions // [] | map(ascii_downcase) | sort) == ($e.NotActions | map(ascii_downcase) | sort)) and
+      ((.permissions[0].dataActions // [] | map(ascii_downcase) | sort) == ($e.DataActions | map(ascii_downcase) | sort)) and
+      ((.permissions[0].notDataActions // [] | map(ascii_downcase) | sort) == ($e.NotDataActions | map(ascii_downcase) | sort))
+    )] | length) == 1 and
+    ($reader_roles | length) == 1 and
+    ([.[] | select(.roleName | startswith("Azure Backup Smart Tiering Policy Remediator - "))] | length) == 0
 ' "$EVIDENCE_DIR/final-custom-roles.json" > /dev/null
 
 for resource in \
