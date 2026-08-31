@@ -31,7 +31,7 @@ umask 077
 git clone https://github.com/kevo099/azure-backup-smart-tiering-automation.git
 cd azure-backup-smart-tiering-automation
 AUTOMATION_DIR="$(pwd)"
-AUTOMATION_COMMIT="d6b31076fbfd01c7010a15ded377b3f21ab9bb96"
+AUTOMATION_COMMIT="1abbdcc066d58d9fb765d78fff3763ee34acf97a"
 git checkout "$AUTOMATION_COMMIT"
 git rev-parse HEAD
 
