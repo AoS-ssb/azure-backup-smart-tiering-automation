@@ -256,7 +256,6 @@ SEED_CURL=(
   --proto '=https'
   --request PUT
   --url "$POLICY_URL"
-  --header "Authorization: Bearer $SEED_TOKEN"
   --header "Content-Type: application/json"
   --data-binary "@$EVIDENCE_DIR/seed.json"
   --dump-header "$EVIDENCE_DIR/seed-headers.txt"
@@ -266,7 +265,10 @@ SEED_CURL=(
 if [ -n "$ETAG" ]; then
   SEED_CURL+=(--header "If-Match: $ETAG")
 fi
-SEED_HTTP_STATUS="$(curl "${SEED_CURL[@]}")"
+SEED_HTTP_STATUS="$(
+  printf 'header = "Authorization: Bearer %s"\n' "$SEED_TOKEN" \
+    | curl --config - "${SEED_CURL[@]}"
+)"
 
 case "$SEED_HTTP_STATUS" in
   200)
@@ -329,13 +331,15 @@ case "$SEED_HTTP_STATUS" in
         --proto '=https'
         --request GET
         --url "$SEED_LOCATION_URL"
-        --header "Authorization: Bearer $SEED_TOKEN"
         --output "$EVIDENCE_DIR/seed-location.json"
         --write-out '%{http_code}'
       )
       while [ "$(date +%s)" -lt "$SEED_DEADLINE" ]; do
         sleep "$SEED_RETRY_AFTER"
-        SEED_LOCATION_STATUS="$(curl "${SEED_LOCATION_CURL[@]}")"
+        SEED_LOCATION_STATUS="$(
+          printf 'header = "Authorization: Bearer %s"\n' "$SEED_TOKEN" \
+            | curl --config - "${SEED_LOCATION_CURL[@]}"
+        )"
         case "$SEED_LOCATION_STATUS" in
           200|201|204) break ;;
           202) ;;
