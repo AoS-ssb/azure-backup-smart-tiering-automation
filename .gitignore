@@ -2,6 +2,15 @@
 .azure/
 .generated/
 *.azure.json
+.env*
+!.env.example
+.private/
+**/evidence/raw/
+**/raw-evidence/
+*.tfstate
+*.tfstate.*
+*.har
+*.cast
 
 # Live tenant evidence is intentionally kept out of Git
 LIVE-DEMO.md
@@ -11,6 +20,7 @@ validation-results.json
 # Local tooling
 .DS_Store
 .vscode/
+__pycache__/
 *.log
 
 # Harness output

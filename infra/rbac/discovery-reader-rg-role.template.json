@@ -1,0 +1,15 @@
+{
+  "Name": "Azure Backup Smart Tiering Discovery Reader - <role-suffix>",
+  "IsCustom": true,
+  "Description": "Can enumerate Recovery Services vaults and read backup policies for Smart Tiering discovery in one resource-group ring. Has no write or delete actions.",
+  "Actions": [
+    "Microsoft.RecoveryServices/Vaults/read",
+    "Microsoft.RecoveryServices/Vaults/backupPolicies/read"
+  ],
+  "NotActions": [],
+  "DataActions": [],
+  "NotDataActions": [],
+  "AssignableScopes": [
+    "/subscriptions/<subscription-id>/resourceGroups/<ring-resource-group>"
+  ]
+}

@@ -17,6 +17,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      - name: Reject tenant-specific and secret public content
+        run: python3 scripts/check_public_content.py
+
       - name: Show PowerShell version (runner ships 7.4 LTS; the runbook targets the PowerShell74 runtime)
         shell: pwsh
         run: $PSVersionTable.PSVersion.ToString()
@@ -42,8 +45,9 @@ jobs:
         run: |
           jq empty infra/rbac/*.json
           jq -e '.NotActions == []' infra/rbac/policy-remediator-role.template.json > /dev/null
-          jq -e '.Actions == ["Microsoft.RecoveryServices/Vaults/read","Microsoft.RecoveryServices/Vaults/backupPolicies/read","Microsoft.RecoveryServices/Vaults/backupPolicies/write","Microsoft.RecoveryServices/Vaults/backupPolicies/operationResults/read","Microsoft.RecoveryServices/Vaults/backupPolicies/operations/read"]' infra/rbac/policy-remediator-role.template.json > /dev/null
+          jq -e '.Name == "Azure Backup Smart Tiering Policy Remediator - <role-suffix>" and .Actions == ["Microsoft.RecoveryServices/Vaults/read","Microsoft.RecoveryServices/Vaults/backupPolicies/read","Microsoft.RecoveryServices/Vaults/backupPolicies/write","Microsoft.RecoveryServices/Vaults/backupPolicies/operationResults/read","Microsoft.RecoveryServices/Vaults/backupPolicies/operations/read"] and (.AssignableScopes[0] | endswith("/resourceGroups/<ring-resource-group>"))' infra/rbac/policy-remediator-role.template.json > /dev/null
           jq -e '.Actions == ["Microsoft.RecoveryServices/Vaults/read","Microsoft.RecoveryServices/Vaults/backupPolicies/read"] and .NotActions == []' infra/rbac/discovery-reader-role.template.json > /dev/null
+          jq -e '.Actions == ["Microsoft.RecoveryServices/Vaults/read","Microsoft.RecoveryServices/Vaults/backupPolicies/read"] and .NotActions == [] and (.AssignableScopes[0] | endswith("/resourceGroups/<ring-resource-group>"))' infra/rbac/discovery-reader-rg-role.template.json > /dev/null
 
       - name: Compile Bicep fixture
         shell: bash
@@ -52,3 +56,9 @@ jobs:
       - name: Shell scripts parse
         shell: bash
         run: for f in scripts/*.sh; do bash -n "$f"; done
+
+      - name: Documented Bash blocks parse
+        shell: bash
+        run: |
+          awk '/^```bash$/{on=1;next} /^```$/{on=0} on' README.md | bash -n
+          awk '/^```bash$/{on=1;next} /^```$/{on=0} on' docs/replicate-in-azure.md | bash -n
