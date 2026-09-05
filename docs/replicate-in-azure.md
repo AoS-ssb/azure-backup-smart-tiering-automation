@@ -8,53 +8,133 @@ the [canonical combined guide](https://github.com/kevo099/azure-enterprise-polic
 The fixture contains no protected items. It proves the control-plane path; it does not move a
 recovery point into archive storage. Read [gotchas.md](gotchas.md) before the first `Apply=true`.
 
+## Before you start
+
+Use this page for **Backup Smart Tiering alone**. The combined guide linked above owns the
+shared Policy + Automation resource group; do not run both creation procedures against that group.
+Allow time for deployment, job startup, and RBAC propagation. A reader-readiness window and a
+writer-apply window each allow up to 15 minutes. Resources remain in Azure at the end; this guide
+creates no spending cap or automatic teardown.
+
+| Stage | What you do | Checkpoint before continuing |
+|---|---|---|
+| 0 | Prepare Linux tools, pin source, choose subscription | Offline checks pass; account and names are correct |
+| 1–3 | Create empty fixture, publish runbook, define helpers | Published content hash matches; recovery values saved |
+| 4 | Optional audit without reader | Failed job, with its cause in the Error stream |
+| 5–6 | Prove reader readiness; seed exact empty policy; audit | One candidate, zero submitted/verified writes |
+| 7 | Optional apply with reader only | Failed write with 403; policy remains unchanged |
+| 8–9 | Grant temporary writer, apply, repeat, remove writer | One verified change; repeat writes zero; writer absent |
+| 10–11 | Inspect retained resources or explicitly tear down | Reader-only inspection state or confirmed RG deletion |
+
+Run numbered steps in order, one complete fenced block at a time. Stop at the first failed check;
+a silent `test` or `jq -e` success means its condition passed. Do not paste this whole document into
+a shell: it contains optional negative tests and a destructive teardown. If a terminal closes,
+use [Recovery and troubleshooting](#recovery-and-troubleshooting) before repeating anything.
+
 ## 0. Prerequisites and source pin
 
-- Bash 4 or newer, `curl`, `jq`, GNU coreutils (`sha256sum` and `sort -V`), Azure CLI 2.75.0 or
-  newer with Bicep and the experimental `automation` extension version `1.0.0b2`, and PowerShell
-  7.4 for the offline harness.
-- A commercial Azure subscription where you can create a new isolated resource group.
-- Contributor for the fixture and runbook. Owner or User Access Administrator is needed only at
-  the canary resource group while creating the two custom roles and their assignments.
+- A **Linux Bash session**, including Ubuntu under WSL on Windows. Native macOS Bash and Windows
+  PowerShell are not sufficient: the role helpers read `/proc/sys/kernel/random/uuid` and use GNU
+  tools. PowerShell below runs only the local harness; the command blocks themselves are Bash.
+- Git, Bash 4 or newer, `curl`, `jq`, GNU coreutils (`sha256sum` and `sort -V`), Azure CLI 2.75.0 or
+  newer, Bicep, and the experimental `automation` extension version `1.0.0b2`.
+- PowerShell **7.4** locally for the offline harness. This is separate from the Azure Automation
+  `PowerShell74` runtime, which the fixture creates for you. No local Az modules are required.
+- A commercial Azure subscription with permission to create the new resource group at subscription
+  scope, for example Contributor at that scope. Contributor only on an existing group cannot create
+  this new group. Resource deployment and runbook publication need Contributor on the canary group.
+- Owner or User Access Administrator on the canary group for **both custom-role definitions and
+  assignments**, including revocation. Arrange this before Step 5 and retain it through Step 9.
+  Contributor cannot write RBAC. Role Based Access Control Administrator alone can manage assignments
+  but does not include `roleDefinitions/write`. See Microsoft's
+  [custom-role permissions](https://learn.microsoft.com/en-us/azure/role-based-access-control/custom-roles#who-can-create-delete-update-or-view-a-custom-role)
+  and [built-in role definitions](https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles/privileged).
 - Permission to register Azure resource providers at subscription scope, or a platform owner who
   registers them before the canary deployment.
 - A region with Automation Account quota. If a fresh deployment fails on quota, inspect and remove
   that incomplete resource group before starting again in another region; do not update it in place.
 
-Clone an immutable reviewed revision, record it with the change, and run the local gates before any
-Azure write:
+If tools are missing, first follow Microsoft's [Azure CLI installation](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli-linux)
+and [PowerShell installation](https://learn.microsoft.com/en-us/powershell/scripting/install/install-ubuntu)
+instructions for your Linux distribution; select PowerShell 7.4. On Ubuntu/WSL, the other packages
+are `git`, `curl`, `jq`, and `coreutils` (`sudo apt-get install git curl jq coreutils`).
+
+Start a dedicated Bash shell so a failing check exits this walkthrough session. Keep your existing
+terminal open; do not enable shell tracing (`set -x`) while running authenticated commands.
+
+```bash
+bash --noprofile --norc
+```
+
+In that new shell, check the tools and install the local CLI components. These setup commands do
+not deploy Azure resources. `az bicep install` is documented in the
+[Bicep setup guide](https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/install).
 
 ```bash
 set -euo pipefail
 umask 077
 
+test "${BASH_VERSINFO[0]}" -ge 4
+test -r /proc/sys/kernel/random/uuid
+for tool in git curl jq sha256sum sort az pwsh; do command -v "$tool"; done
+AZ_CLI_VERSION="$(az version --query '"azure-cli"' -o tsv)"
+test "$(printf '%s\n' 2.75.0 "$AZ_CLI_VERSION" | sort -V | head -1)" = "2.75.0"
+pwsh -NonInteractive -NoProfile -Command 'if ($PSVersionTable.PSVersion.Major -ne 7 -or $PSVersionTable.PSVersion.Minor -ne 4) { throw "Use PowerShell 7.4 for this harness" }; $PSVersionTable.PSVersion.ToString()'
+az bicep install
+az bicep version
+az extension add --name automation --version 1.0.0b2 --upgrade --yes
+test "$(az extension show --name automation --query version -o tsv)" = "1.0.0b2"
+
+EVIDENCE_ROOT="$HOME/.local/state/azure-backup-replication"
+mkdir -p "$EVIDENCE_ROOT"
+EVIDENCE_DIR="$(mktemp -d "$EVIDENCE_ROOT/run.XXXXXXXX")"
+printf 'Private evidence directory: %s\n' "$EVIDENCE_DIR"
+
 git clone https://github.com/kevo099/azure-backup-smart-tiering-automation.git
 cd azure-backup-smart-tiering-automation
 AUTOMATION_DIR="$(pwd)"
+cp docs/replicate-in-azure.md "$EVIDENCE_DIR/guide-used.md"
+git rev-parse HEAD > "$EVIDENCE_DIR/guide-revision.txt"
 AUTOMATION_COMMIT="1abbdcc066d58d9fb765d78fff3763ee34acf97a"
-git checkout "$AUTOMATION_COMMIT"
-git rev-parse HEAD
+git checkout --detach "$AUTOMATION_COMMIT"
+test "$(git rev-parse HEAD)" = "$AUTOMATION_COMMIT"
+printf '%s\n' "$AUTOMATION_COMMIT" > "$EVIDENCE_DIR/source-revision.txt"
 
 pwsh -NonInteractive -NoProfile -File tests/StaticValidation.ps1
 pwsh -NonInteractive -NoProfile -File tests/BehaviorHarness.ps1
 for file in scripts/*.sh; do bash -n "$file"; done
+bash tests/ReplicationGuideTrapTest.sh
 jq empty infra/rbac/*.json
 az bicep build --file infra/test-environment.bicep --stdout > /dev/null
 ```
 
-Sign in and define local-only values. Use a unique suffix; vault and Automation Account names must
-not collide with existing resources.
+**Checkpoint:** the static check and all 45 behavioral scenarios pass; the trap regression passes;
+Bicep and JSON validation exit successfully. A detached-HEAD notice is expected. Keep following this
+page or `$EVIDENCE_DIR/guide-used.md`: checkout pins the deployment code and also replaces on-disk
+docs with their older versions. Do not switch to an older guide and follow its earlier source pin.
+An existing clone directory causes `git clone` to fail; choose a fresh parent directory and restart
+Step 0 instead of repurposing a working checkout.
+
+Sign in, explicitly select the intended tenant and subscription, then define local-only names.
+Replace the three angle-bracket values. Use 4–12 lowercase letters/digits for the suffix; keep it
+unique to this run. `centralus` is an example, subject to your subscription's quota and policy.
+If the login cannot open a browser, use `az login --tenant "$TENANT_ID" --use-device-code` instead.
 
 ```bash
-az login
-AZ_CLI_VERSION="$(az version --query '"azure-cli"' -o tsv)"
-test "$(printf '%s\n' 2.75.0 "$AZ_CLI_VERSION" | sort -V | head -1)" = "2.75.0"
-az extension add --name automation --version 1.0.0b2 --upgrade --yes
-test "$(az extension show --name automation --query version -o tsv)" = "1.0.0b2"
-
-SUB="$(az account show --query id -o tsv)"
-REGION="centralus"
+TENANT_ID="<tenant-id>"
+SUB="<subscription-id>"
 SUFFIX="<unique-short-suffix>"
+[[ "$TENANT_ID" != *'<'* && "$SUB" != *'<'* ]]
+[[ "$SUFFIX" =~ ^[a-z0-9]{4,12}$ ]]
+az login --tenant "$TENANT_ID"
+az account list --query '[].{name:name,id:id,tenantId:tenantId}' -o table
+az account set --subscription "$SUB"
+test "$(az cloud show --query name -o tsv)" = "AzureCloud"
+test "$(az account show --query id -o tsv)" = "$SUB"
+test "$(az account show --query tenantId -o tsv)" = "$TENANT_ID"
+az account show --query '{name:name,id:id,tenantId:tenantId}' -o table
+
+REGION="centralus"
 RG="rg-smart-tiering-$SUFFIX"
 AA="aa-smart-tiering-$SUFFIX"
 RG_VAULT="rsv-smarttier-rg-$SUFFIX"
@@ -62,12 +142,19 @@ SUB_VAULT="rsv-smarttier-sub-$SUFFIX"
 POLICY="smart-tiering-remediation-canary"
 ARM="https://management.azure.com"
 RG_SCOPE="/subscriptions/$SUB/resourceGroups/$RG"
-EVIDENCE_DIR="$(mktemp -d)"
+
+# Bash-escaped values only: no credentials, access tokens, or shell history.
+for variable in TENANT_ID SUB REGION RG AA RG_VAULT SUB_VAULT POLICY ARM RG_SCOPE \
+  AUTOMATION_DIR AUTOMATION_COMMIT EVIDENCE_DIR; do
+  printf '%s=%q\n' "$variable" "${!variable}"
+done > "$EVIDENCE_DIR/session-values.sh"
+printf 'Chosen region=%s resource-group=%s account=%s\n' "$REGION" "$RG" "$AA"
 ```
 
-Run every command block in one Bash session. The evidence directory is outside the repository and
-has private permissions because of `umask 077`. Do not commit raw job output, resource IDs,
-principal IDs, or rendered role definitions.
+**Checkpoint:** inspect the displayed subscription, tenant, and resource names before continuing.
+Run every subsequent command block in this same Bash session from `$AUTOMATION_DIR`. Private
+records stay outside the repository. Keep the printed evidence path for recovery; do not commit
+raw job output, resource IDs, principal IDs, or rendered role definitions.
 
 ## 1. Deploy the fresh fixture once
 
@@ -76,7 +163,12 @@ Create a new resource group, prove it is empty, then deploy the safe compliant f
 
 ```bash
 for provider in Microsoft.Authorization Microsoft.Automation Microsoft.RecoveryServices; do
-  az provider register --subscription "$SUB" --namespace "$provider" --wait --only-show-errors
+  if [ "$(az provider show --subscription "$SUB" --namespace "$provider" \
+    --query registrationState -o tsv)" != "Registered" ]; then
+    az provider register --subscription "$SUB" --namespace "$provider" --wait --only-show-errors
+  fi
+  test "$(az provider show --subscription "$SUB" --namespace "$provider" \
+    --query registrationState -o tsv)" = "Registered"
 done
 
 test "$(az group exists --subscription "$SUB" --name "$RG")" = "false"
@@ -111,6 +203,7 @@ PRINCIPAL="$(az automation account show \
   --name "$AA" \
   --query identity.principalId -o tsv)"
 test -n "$PRINCIPAL"
+printf 'PRINCIPAL=%q\n' "$PRINCIPAL" >> "$EVIDENCE_DIR/session-values.sh"
 ```
 
 The Bicep file creates the Automation Account, PowerShell 7.4 runtime, two empty vaults, and one
@@ -125,7 +218,8 @@ EXPECTED_RUNBOOK_SHA="$(sha256sum src/Enable-SmartTiering.ps1 | cut -d' ' -f1)"
 SUBSCRIPTION_ID="$SUB" \
 RESOURCE_GROUP="$RG" \
 AUTOMATION_ACCOUNT="$AA" \
-scripts/publish-runbook.sh
+scripts/publish-runbook.sh | tee "$EVIDENCE_DIR/publication.txt"
+printf 'EXPECTED_RUNBOOK_SHA=%q\n' "$EXPECTED_RUNBOOK_SHA" >> "$EVIDENCE_DIR/session-values.sh"
 ```
 
 The script discovers the Automation Account location unless `LOCATION` is explicitly supplied. It
@@ -134,8 +228,9 @@ file`. Record the printed SHA-256 with the source commit.
 
 ## 3. Job helpers
 
-The experimental CLI can start and inspect jobs but does not expose their output. These helpers use
-the Automation REST API for terminal status, output, and all streams:
+The experimental CLI can start and inspect jobs but does not expose their output. Paste this entire
+block once; it defines functions and installs the writer-cleanup trap without starting a job.
+The helpers use the Automation REST API for terminal status, output, and stream summaries:
 
 ```bash
 AA_BASE="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.Automation/automationAccounts/$AA"
@@ -493,6 +588,10 @@ Do not describe `writesSubmitted` as a successful change: it counts the attempte
 
 ## 8. Temporary writer, bounded apply, and idempotent repeat
 
+Complete Steps 8 and 9 in one sitting. Keep your own RG-level RBAC administration authority active
+until writer revocation finishes. If interrupted, follow the recovery section; an EXIT trap cannot
+run after a machine crash or a forcibly killed shell.
+
 The grant helper rolls back only artifacts it created if propagation prevents a
 complete grant. Activate the outer EXIT cleanup immediately after it succeeds:
 
@@ -747,13 +846,15 @@ do
     --query 'tags.Lifecycle' -o tsv)" = "RetainForInspection"
 done
 
-find "$EVIDENCE_DIR" -type f -delete
-rmdir "$EVIDENCE_DIR"
 trap - EXIT
+printf 'PASS: verified apply, idempotent repeat, and writer removal. Evidence retained at %s\n' "$EVIDENCE_DIR"
 ```
 
 The `diff` must be empty. The writer assignment and its ring role are now gone; leave the RG-scoped
-reader assignment so audits and the Portal inspection surface keep working.
+reader assignment so audits and the Portal inspection surface keep working. Keep the private
+source/guide revisions, published hash, pre/post policy documents, and job output for your change
+record. Delete that local evidence only after your own retention needs are met; it is not required
+for the retained Azure resources to operate.
 
 ## 10. Leave-alive inspection state
 
@@ -787,10 +888,97 @@ test "$(printf '%s' "$DELETE_RG_ID" | tr '[:upper:]' '[:lower:]')" = \
   "$(printf '%s' "$RG_SCOPE" | tr '[:upper:]' '[:lower:]')"
 test "$DELETE_RG_PURPOSE" = "SmartTieringLiveDemo"
 
+az resource list --subscription "$SUB" --resource-group "$RG" \
+  --query '[].{name:name,type:type}' -o table
+for vault in "$RG_VAULT" "$SUB_VAULT"; do
+  test "$(az backup item list --subscription "$SUB" --resource-group "$RG" \
+    --vault-name "$vault" --query 'length(@)' -o tsv)" = "0"
+done
+```
+
+**Checkpoint:** the inventory must contain only this walkthrough's Automation account and two
+vaults, plus their child resources. If anything has been added, stop and identify its owner before
+proceeding. Both item-count assertions must pass. For a failed deployment where a resource never
+existed, inspect the partial inventory first; do not treat a failed lookup as an empty vault.
+
+```bash
 scripts/ring-role.sh revoke "$SUB" "$RG" "$PRINCIPAL"
 scripts/discovery-role.sh revoke "$SUB" "$RG" "$PRINCIPAL"
 
 az group delete --subscription "$SUB" --name "$RG" --yes --no-wait
 ```
 
-The fixture has zero protected items, but deletion is still an explicit operator choice.
+`--no-wait` accepts the deletion request; it does not prove that deletion finished. Complete this
+check before calling the teardown done:
+
+```bash
+az group wait --subscription "$SUB" --name "$RG" --deleted --interval 15 --timeout 1800
+test "$(az group exists --subscription "$SUB" --name "$RG")" = "false"
+```
+
+The fixture has zero protected items, but deletion is still an explicit operator choice. If deletion
+fails, inspect the group's Activity log and any locks or protected/soft-deleted backup items. Do not
+force-remove protections from a vault that someone has since started using.
+
+## Recovery and troubleshooting
+
+On a failed assertion, read the command immediately above the failure and keep the evidence.
+The EXIT trap attempts writer revocation only when the grant step completed in this session;
+it does not stop an Azure job or cancel a submitted policy update. A timed-out or interrupted apply
+therefore needs direct policy inspection before any retry.
+
+If the shell has closed, open a fresh Linux Bash session. Replace the evidence directory below with
+the path printed in Step 0. Source only the `session-values.sh` that this walkthrough generated and
+that you own; it is executable shell text. This block restores identifiers, inspects the exact
+resource group, and removes the temporary writer. It does not resume deployment or apply.
+
+```bash
+set -euo pipefail
+umask 077
+EVIDENCE_DIR="<absolute-path-to-your-private-run-directory>"
+test -r "$EVIDENCE_DIR/session-values.sh"
+source "$EVIDENCE_DIR/session-values.sh"
+cd "$AUTOMATION_DIR"
+test "$(git rev-parse HEAD)" = "$AUTOMATION_COMMIT"
+az login --tenant "$TENANT_ID"
+az account set --subscription "$SUB"
+test "$(az account show --query tenantId -o tsv)" = "$TENANT_ID"
+az group show --subscription "$SUB" --name "$RG" \
+  --query '{name:name,id:id,tags:tags}' -o json
+
+PRINCIPAL="$(az automation account show --subscription "$SUB" --resource-group "$RG" \
+  --name "$AA" --query identity.principalId -o tsv)"
+test -n "$PRINCIPAL"
+scripts/ring-role.sh revoke "$SUB" "$RG" "$PRINCIPAL"
+```
+
+If failure occurred before the account existed, the principal lookup fails and no writer could have
+been granted by these steps. Inspect the incomplete deployment before choosing a new resource group.
+If revocation fails, the account's writer might remain: have the RG Owner/User Access Administrator
+run the exact `revoke` command with the saved values and verify its success before continuing.
+
+Re-paste Step 3 to restore the read-only job helpers. Inspect **Automation Account → Jobs** for the
+last attempt; for a recorded job name, `job_streams "$APPLY_JOB"` and `job_output "$APPLY_JOB"` expose
+its cause (set `APPLY_JOB` from the Portal if the session lost it). Do not restart a nonterminal job.
+If you deliberately stop it through the Portal, wait for a terminal state and inspect the exact
+policy afterward: stopping the job does not undo an accepted ARM write.
+
+| Symptom | Next step |
+|---|---|
+| `command not found`, wrong PowerShell, missing `/proc` | Finish Step 0 on Linux/WSL before any Azure work. |
+| Subscription/tenant check fails | Correct the two values and sign in to that tenant; do not remove the assertions. |
+| Deployment quota/region failure | Inspect **Resource group → Deployments → failed deployment → Operation details**. Remove only this incomplete empty fixture through the guarded teardown, then restart with fresh names. If the Automation Account never existed, skip the two role-revoke commands after confirming no grant step ran. |
+| `AuthorizationFailed` on role definition or assignment | Check the operation named by the error and the operator's active RG permissions. Contributor and assignment-only RBAC authority cannot create custom roles. Keep the grant helper's rollback output. |
+| Publish exits without the expected hash message | Inspect the runbook draft/state and the local publication log. The pinned publisher suppresses some CLI errors; rerun the failing individual CLI command from `scripts/publish-runbook.sh` without its stderr redirection to see the cause. Do not start jobs until hash verification succeeds. |
+| Failed job has no `SUMMARY` | Read its Error stream; initialization/validation can fail before summaries. Step 4 deliberately expects failure, and Step 5 permits failed read-only readiness jobs within its deadline. Elsewhere, investigate before continuing. |
+| Reader/apply deadline expires, `writesUnknown > 0`, or seed polling fails | Revoke writer access, wait for the job/ARM operation to settle, and GET the exact policy. Compare non-tiering properties with `pre.json`. Do not rerun the full fixture or blindly repeat the seed/apply. |
+| An unexpected `test`/`jq` failure | Keep the relevant JSON/output file and inspect it locally with `jq .`. Its difference from the required condition is the reason to stop. |
+
+For an interrupted canary, restore the exact `POLICY_ID`/`POLICY_URL` assignments at the start of
+Step 5 and GET that URL into a new private evidence file. Compare it with the saved `pre.json` using
+Step 9's non-tiering comparison. `TierRecommended` with unchanged non-tiering properties can proceed
+to read-only inspection after the job is terminal; it does not by itself prove that the interrupted
+apply passed. `DoNotTier` with those properties unchanged can restart at Step 6 after restoring
+Step 3's helpers. A changed protected-item count, an unknown tiering mode, missing evidence, or
+non-tiering drift needs operator investigation. This guide has no generic policy rollback: the safe end state is the initial
+`TierRecommended` on the same empty policy, proven by the saved pre/post comparison.

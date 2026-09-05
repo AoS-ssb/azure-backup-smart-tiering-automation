@@ -12,6 +12,18 @@ tracking of the asynchronous update, and full post-write verification.
 > mocked ARM transport. See [CHANGELOG.md](CHANGELOG.md) and [docs/validation.md](docs/validation.md) for exactly
 > what has and has not been proven live.
 
+## Start here
+
+| Your goal | Follow this path |
+|---|---|
+| Deploy and understand this Backup Automation canary | [Standalone walkthrough](docs/replicate-in-azure.md): tools, permissions, exact commands, expected results, recovery, and cleanup |
+| Deploy the Policy + Automation showcase together | [Combined walkthrough](https://github.com/kevo099/azure-enterprise-policy-baseline/blob/main/docs/REPLICATE-POLICY-AUTOMATION.md); it owns the shared resource group |
+| Inspect an existing deployment | [Portal inspection guide](docs/inspection-guide.md); no deployment required |
+| Review the code without deploying | [Local validation](#local-validation) and [recorded qualification](docs/validation.md) |
+
+For your first deployment, keep the chosen walkthrough open and follow it in order. The examples
+below explain individual operations and are not a second end-to-end deployment procedure.
+
 ## What it changes
 
 Smart Tiering is configured on each Recovery Services vault child backup policy — not on the vault:
@@ -104,22 +116,19 @@ intentionally excluded.
 - An Azure subscription (commercial Azure — the runbook uses `management.azure.com` and the
   public identity audience; sovereign clouds are not supported) where you can create the
   isolated test resources.
-- Permission to create an Automation Account, Recovery Services vaults, custom roles and role
-  assignments.
-- Bash 4 or newer and GNU coreutils (`sort -V` and `sha256sum`).
+- Subscription-level permission to create the new resource group; Contributor on the canary group
+  for its resources and runbook; Owner or User Access Administrator on that group for custom-role
+  definitions and assignments, including revocation. Contributor alone cannot write RBAC.
+- Linux or WSL with Bash 4 or newer, Git, `curl`, `jq`, and GNU coreutils (`sort -V` and `sha256sum`).
+  The role helpers also require Linux `/proc/sys/kernel/random/uuid`; native macOS is not supported.
 - Azure CLI 2.75.0 or newer with the experimental `automation` extension pinned
   to the qualified version `1.0.0b2`.
-- A PowerShell 7.4 Runtime Environment in Azure Automation (no packages required).
+- Bicep CLI and local PowerShell 7.4 for validation. The Bicep fixture creates the separate
+  PowerShell 7.4 Runtime Environment in Azure Automation (no packages required).
 - A deliberate RBAC and change-approval decision before applying beyond a canary resource group.
 
-```bash
-set -euo pipefail
-az login
-AZ_CLI_VERSION="$(az version --query '"azure-cli"' -o tsv)"
-test "$(printf '%s\n' 2.75.0 "$AZ_CLI_VERSION" | sort -V | head -1)" = "2.75.0"
-az extension add --name automation --version 1.0.0b2 --upgrade --yes
-test "$(az extension show --name automation --query version -o tsv)" = "1.0.0b2"
-```
+See [walkthrough Step 0](docs/replicate-in-azure.md#0-prerequisites-and-source-pin) for installation
+links, version checks, the immutable source pin, and explicit tenant/subscription selection.
 
 ## Deploy the empty test fixture
 
@@ -287,11 +296,13 @@ az automation runbook start \
     Apply=false
 ```
 
-Review the job output. Expect exactly one `WouldEnableTierRecommended` row (or `AlreadyCompliant`
-after the safe redeploy). Then run the same command with `Apply=true`. With the defaults
-(`MaxChanges=1`, `MaxProtectedItemsPerPolicy=0`) the runbook will write at most one empty policy
-and fail closed on anything unexpected. Run it a third time and require `policiesWritten=0` and
-`AlreadyCompliant`.
+Review the job output. A newly deployed fixture reports `AlreadyCompliant` because both policies
+start as `TierRecommended`. A mutation proof requires the exact-policy seed, reader-readiness
+check, temporary writer grant, and cleanup in [walkthrough Steps 5–9](docs/replicate-in-azure.md#5-grant-rg-only-reader-access-and-seed-only-the-exact-policy).
+That sequence requires one `WouldEnableTierRecommended` audit result, one verified apply, then
+zero writes with `AlreadyCompliant` on repeat. With the defaults (`MaxChanges=1`,
+`MaxProtectedItemsPerPolicy=0`) the runbook writes at most one empty policy. An audit job alone does
+not prove writer authorization or successful remediation.
 
 For subscription discovery, set `ScopeType=Subscription` and omit `ResourceGroupName`. Audit
 freely; applying at subscription scope requires `AllowUnfilteredApply=true` or exact filters and
@@ -310,17 +321,11 @@ apply again and expect `WouldEnableTierRecommended` → `EnabledAndVerified`
 
 ## Teardown
 
-The fixture holds no backup data, so deleting the resource group is safe. Remove the role
-assignments and definitions you created if nothing else uses them:
-
-```bash
-scripts/ring-role.sh revoke "<subscription-id>" "<test-resource-group>" "<automation-account-principal-id>"
-scripts/discovery-role.sh revoke "<subscription-id>" "<test-resource-group>" "<automation-account-principal-id>"
-az group delete --subscription "<subscription-id>" --name "<test-resource-group>" --yes --no-wait
-```
-
-The replication guide's default handoff does not run this teardown: it removes only writer access
-and leaves the read-only inspection resources alive.
+The default walkthrough removes temporary writer access and leaves the reader and inspection
+resources alive. For a dedicated Automation-only group, use its [guarded teardown](docs/replicate-in-azure.md#11-optional-teardown)
+to inspect current ownership, remove the two custom roles and assignments, delete the group, and
+wait for confirmed deletion. An originally empty fixture may have changed since deployment.
+If the group is shared with the Policy showcase, use the combined guide's coordinated cleanup.
 
 ## What has been validated
 
@@ -368,10 +373,24 @@ hardening status.
 
 ## Local validation
 
+Run from the repository root on Linux/WSL after installing PowerShell 7.4, Python 3, `jq`, and
+Azure CLI/Bicep (installation links are in walkthrough Step 0). These checks do not authenticate to
+Azure or deploy resources. Install PSScriptAnalyzer once in your local PowerShell module directory:
+
 ```bash
-pwsh -NoProfile -File tests/StaticValidation.ps1
-pwsh -NoProfile -File tests/BehaviorHarness.ps1          # exit code 1 on any failed oracle
-pwsh -NoProfile -Command "Invoke-ScriptAnalyzer -Path src/Enable-SmartTiering.ps1 -Severity Error,Warning"
+pwsh -NonInteractive -NoProfile -Command 'Install-Module PSScriptAnalyzer -Scope CurrentUser -Repository PSGallery -Force'
+```
+
+Then run the checks. The analyzer command below fails when it finds an error or warning.
+
+```bash
+set -euo pipefail
+python3 scripts/check_public_content.py
+pwsh -NonInteractive -NoProfile -File tests/StaticValidation.ps1
+pwsh -NonInteractive -NoProfile -File tests/BehaviorHarness.ps1
+pwsh -NonInteractive -NoProfile -Command '$findings = @(Invoke-ScriptAnalyzer -Path src/Enable-SmartTiering.ps1 -Severity Error,Warning -ErrorAction Stop); $findings | Format-Table -AutoSize; if ($findings.Count -gt 0) { exit 1 }'
+for file in scripts/*.sh; do bash -n "$file"; done
+bash tests/ReplicationGuideTrapTest.sh
 jq empty infra/rbac/*.json
 az bicep build --file infra/test-environment.bicep --stdout > /dev/null
 ```

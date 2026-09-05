@@ -16,8 +16,12 @@ From an authenticated workstation:
    - apply: `1/1/1`, with zero failed or unknown writes;
    - repeat: `0/0/0` and an `AlreadyCompliant` row.
 7. Open **Identity** and confirm a system-assigned managed identity exists.
-8. Open **Access control (IAM)** and confirm the RG-scoped discovery reader remains while the
-   policy-remediator writer assignment is absent.
+8. Return to the **resource group → Access control (IAM) → Role assignments** and filter by the
+   Automation Account's managed identity (its object ID is under **Identity**). Confirm the
+   `Azure Backup Smart Tiering Discovery Reader - <scope-hash>` assignment remains at that group
+   and the `Azure Backup Smart Tiering Policy Remediator - <scope-hash>` assignment is absent.
+   This is the runbook identity's access, separate from your own operator roles. Inspect inherited
+   assignments too if someone granted additional access after deployment.
 9. Open **Schedules** and confirm there are zero schedules and zero linked job schedules.
 10. Open each Recovery Services vault → **Backup policies** → the canary policy. Confirm
     `TierRecommended` and zero protected items.
